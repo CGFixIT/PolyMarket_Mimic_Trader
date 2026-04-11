@@ -1,0 +1,34 @@
+# Polymarket Copy Trading Bot Configuration
+
+mode: paper  # paper | live
+polling_interval_seconds: 20
+max_tracked_traders: 5
+
+trader_selection:
+  min_pnl: 10000
+  min_win_rate: 0.60
+  min_trades: 50
+  rebalance_days: 7
+
+copy_trading:
+  size_multiplier: 0.5
+  max_trade_pct: 0.02        # 2% of bankroll per trade
+  max_trader_allocation: 0.05 # 5% per trader
+  max_price_deviation: 0.02   # Skip if price moved >2%
+  max_concurrent_positions: 10
+
+risk_management:
+  take_profit_pct: 0.15
+  stop_loss_pct: 0.05
+  trailing_stop_pct: 0.10
+  time_exit_hours: 48
+  time_exit_min_move: 0.03
+  daily_loss_limit_pct: 0.03
+  drawdown_stop_pct: 0.08
+  cooldown_after_losses: 3
+  cooldown_minutes: 60
+  min_market_volume: 5000
+
+logging:
+  level: INFO
+  file: trades.log
