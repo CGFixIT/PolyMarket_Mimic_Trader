@@ -2,11 +2,11 @@
 name = "polymarket-copier"
 version = "0.2.0"
 description = "Polymarket copy-trading bot with conservative, range-relative risk management"
-requires-python = ">=3.9"
+requires-python = ">=3.10"
 
 [tool.ruff]
 line-length = 120
-target-version = "py39"
+target-version = "py310"
 extend-exclude = [".claude", "data"]
 
 [tool.ruff.lint]
@@ -25,3 +25,6 @@ ignore = [
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
+markers = [
+    "integration: mark test as requiring live Polymarket API access (deselect with -m 'not integration')",
+]
