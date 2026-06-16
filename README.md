@@ -5,6 +5,7 @@ A Python copy-trading bot that monitors the most successful traders on [Polymark
 ## Why This Exists
 
 Only 7.6% of Polymarket wallets are profitable, but the top performers consistently outperform by applying disciplined strategies across many markets. This bot identifies those traders, monitors their activity, and mirrors their entries with tighter risk controls so you capture the same edge with less downside exposure.
+- NOTE: I havent even tested this yet outside of free emulation environments so use at your own risk if you know what the code is doing. I take no responsibility but wanted to share for fun. will ipdate if I test in real scenario with money attached to it
 
 ## How It Works
 
