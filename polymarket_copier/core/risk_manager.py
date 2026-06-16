@@ -1,128 +1,411 @@
-"""Risk management — conservative sell thresholds and position limits."""
+"""
+core/risk_manager.py — Range-relative Take Profit / Stop Loss for Polymarket
+
+WHY THIS EXISTS
+---------------
+Polymarket tokens are bounded in [0, 1] (0¢ to 100¢ per share). Standard
+flat-percentage TP/SL is logically broken at range extremes:
+
+    Entry $0.82 → 15% TP = $0.943  (captures only 67% of remaining upside)
+    Entry $0.97 → 15% TP = $1.12   (IMPOSSIBLE — token max is $1.00)
+    Entry $0.02 →  5% SL = $0.019  (noise-triggered; $0.001 move stops you out)
+
+THE FIX: thresholds are expressed as fractions of the *remaining distance*
+to the token's natural ceiling (1.0) or floor (0.0):
+
+    dist_to_ceil  = 1.0 − entry_price   ← remaining upside
+    dist_to_floor = entry_price          ← remaining downside
+
+    TP price = entry + max(dist_to_ceil  × tp_fraction,  min_tp_abs)
+    SL price = entry − max(dist_to_floor × sl_fraction,  min_sl_abs)
+
+    Both results are clamped to [0.0, 1.0].
+
+EXAMPLES (defaults: tp_fraction=0.40, sl_fraction=0.25)
+--------------------------------------------------------
+  Entry  │  TP     │  SL     │  Risk:Reward (remaining range)
+  ────────┼─────────┼─────────┼──────────────────────────────────
+  $0.20  │  $0.52  │  $0.15  │  4.4:1 (TP captures 40% of $0.80 upside)
+  $0.50  │  $0.70  │  $0.375 │  2.2:1 (TP captures 40% of $0.50 upside)
+  $0.82  │  $0.892 │  $0.615 │  1.7:1 (TP captures 40% of $0.18 upside)
+  $0.97  │  $1.00* │  $0.727 │  *clamped to token ceiling
+  $0.02  │  $0.412 │  $0.00* │  *floored to token floor
+"""
 
 from __future__ import annotations
 
 import logging
 import time
-from typing import Optional
+from dataclasses import dataclass, field
+from enum import Enum, auto
+from typing import Dict, Optional, Tuple
 
-from polymarket_copier.config import CopyTradingConfig, RiskManagementConfig
-from polymarket_copier.models.types import CopyOrder, ExitReason, Position, Trade, TradeSide
+logger = logging.getLogger(__name__)
 
-logger = logging.getLogger("polymarket_copier")
+_EPSILON = 1e-9
 
+
+# ─── Enums ────────────────────────────────────────────────────────────────────
+
+class ExitReason(Enum):
+    HOLD              = auto()
+    TAKE_PROFIT       = auto()
+    STOP_LOSS         = auto()
+    TRAILING_STOP     = auto()
+    TIME_EXIT         = auto()
+    DAILY_LOSS_LIMIT  = auto()  # Portfolio circuit breaker
+    MARKET_RESOLVING  = auto()  # Within resolution blackout window
+    EXPOSURE_CAP      = auto()  # Market-level cap would be breached
+
+
+class Side(Enum):
+    BUY  = "BUY"
+    SELL = "SELL"
+
+
+# ─── Custom Exceptions ────────────────────────────────────────────────────────
+
+class ExposureCapError(RuntimeError):
+    """Raised when a new position would breach the per-market exposure cap."""
+
+
+class InvalidPriceError(ValueError):
+    """Raised when a price is outside the valid Polymarket token range [0, 1]."""
+
+
+# ─── Configuration ────────────────────────────────────────────────────────────
+
+@dataclass
+class RiskConfig:
+    # --- Range-relative threshold fractions ---
+    tp_range_fraction: float        = 0.40   # Capture 40% of remaining upside
+    sl_range_fraction: float        = 0.25   # Risk 25% of remaining downside
+
+    # --- Absolute minimum distances (guard rail for extreme entries) ---
+    min_tp_abs: float               = 0.03
+    min_sl_abs: float               = 0.02
+
+    # --- Trailing stop ---
+    trailing_stop_fraction: float   = 0.15
+
+    # --- Time-based exit ---
+    time_exit_hours: float          = 48.0
+    time_exit_min_range_move: float = 0.10   # < 10% of remaining range → stale, exit
+
+    # --- Portfolio-level circuit breakers ---
+    daily_loss_limit_pct: float     = 0.03   # Stop all trading if daily loss > 3% bankroll
+    max_market_exposure_pct: float  = 0.08   # Max 8% of bankroll in any one market
+
+    # --- Market resolution blackout ---
+    resolution_blackout_hours: float = 24.0
+
+
+# ─── Position ─────────────────────────────────────────────────────────────────
+
+@dataclass
+class Position:
+    """
+    Represents a single open copy-trade position.
+    Always construct via RiskManager.build_position() to guarantee
+    range-relative TP/SL are computed and market exposure is registered.
+    """
+    position_id:    str
+    market_id:      str
+    token_id:       str
+    trader_address: str              # Wallet we're copying
+    side:           Side
+    entry_price:    float
+    size_shares:    float
+    entry_time:     float            = field(default_factory=time.time)
+
+    tp_price:       Optional[float]  = None
+    sl_price:       Optional[float]  = None
+    peak_price:     Optional[float]  = None  # Tracks highest price since entry
+    resolve_time:   Optional[float]  = None  # Unix timestamp of market resolution
+
+    def __post_init__(self):
+        if self.tp_price is None:
+            raise ValueError(
+                "tp_price is None. Construct positions via RiskManager.build_position()."
+            )
+        if self.sl_price is None:
+            raise ValueError(
+                "sl_price is None. Construct positions via RiskManager.build_position()."
+            )
+        if self.peak_price is None:
+            self.peak_price = self.entry_price
+
+    def pnl_at(self, current_price: float) -> float:
+        """Unrealized (or realized) PnL at a given price."""
+        if self.side == Side.BUY:
+            return (current_price - self.entry_price) * self.size_shares
+        return (self.entry_price - current_price) * self.size_shares
+
+    def __repr__(self) -> str:
+        return (
+            f"Position(id={self.position_id!r}, entry={self.entry_price:.4f}, "
+            f"tp={self.tp_price:.4f}, sl={self.sl_price:.4f}, "
+            f"peak={self.peak_price:.4f})"
+        )
+
+
+# ─── RiskManager ──────────────────────────────────────────────────────────────
 
 class RiskManager:
-    """Enforces conservative risk management rules on all trading decisions."""
+    """
+    Stateful risk engine for a copy-trading bot on Polymarket.
 
-    def __init__(self, risk_config: RiskManagementConfig, copy_config: CopyTradingConfig, bankroll: float):
-        self.risk = risk_config
-        self.copy = copy_config
-        self.bankroll = bankroll
-        self.daily_pnl: float = 0.0
-        self.daily_reset_time: float = time.time()
-        self.consecutive_losses: int = 0
-        self.cooldown_until: float = 0.0
-        self.trader_pnl: dict[str, float] = {}
+    Responsibilities:
+    - Compute range-relative TP/SL for every new position
+    - Evaluate open positions on every price tick
+    - Track and enforce per-market exposure caps
+    - Track and enforce daily loss circuit breaker
+    - Record exits and update bankroll / daily PnL
+    """
 
-    def reset_daily_if_needed(self) -> None:
-        """Reset daily P&L counter at midnight."""
-        elapsed = time.time() - self.daily_reset_time
-        if elapsed >= 86400:
-            logger.info("Daily P&L reset: was $%.2f", self.daily_pnl)
-            self.daily_pnl = 0.0
-            self.daily_reset_time = time.time()
+    def __init__(self, config: RiskConfig, bankroll: float):
+        if bankroll <= 0:
+            raise ValueError(f"Bankroll must be positive. Got: {bankroll}")
+        self.cfg               = config
+        self.bankroll          = bankroll
+        self._daily_pnl        = 0.0
+        self._day_start_ts     = _midnight_utc()
+        # market_id → total $ value currently allocated in that market
+        self._market_exposure: Dict[str, float] = {}
 
-    def check_position_exit(self, position: Position) -> Optional[ExitReason]:
-        """Check if a position should be exited based on conservative thresholds."""
-        pnl_pct = position.unrealized_pnl_pct
+    # ── Position factory ──────────────────────────────────────────────────────
 
-        # Take profit at 15%
-        if pnl_pct >= self.risk.take_profit_pct:
-            logger.info("TAKE_PROFIT triggered: %.1f%% >= %.1f%% on %s", pnl_pct * 100, self.risk.take_profit_pct * 100, position.market_id)
+    def build_position(
+        self,
+        position_id:    str,
+        market_id:      str,
+        token_id:       str,
+        trader_address: str,
+        entry_price:    float,
+        size_shares:    float,
+        resolve_time:   Optional[float] = None,
+    ) -> Position:
+        """
+        Validate price, compute range-relative TP/SL, check exposure cap,
+        and return a fully initialised Position.
+
+        Raises:
+            InvalidPriceError   — if entry_price ∉ [0.0, 1.0]
+            ExposureCapError    — if position would breach per-market cap
+        """
+        _assert_valid_price(entry_price, "entry_price")
+
+        tp, sl         = self._compute_thresholds(entry_price)
+        position_value = entry_price * size_shares
+        self._assert_exposure_cap(market_id, position_value)
+
+        pos = Position(
+            position_id    = position_id,
+            market_id      = market_id,
+            token_id       = token_id,
+            trader_address = trader_address,
+            side           = Side.BUY,
+            entry_price    = entry_price,
+            size_shares    = size_shares,
+            tp_price       = tp,
+            sl_price       = sl,
+            peak_price     = entry_price,
+            resolve_time   = resolve_time,
+        )
+
+        self._market_exposure[market_id] = (
+            self._market_exposure.get(market_id, 0.0) + position_value
+        )
+
+        logger.info(
+            "build_position | id=%-20s mkt=%s entry=%.4f TP=%.4f SL=%.4f "
+            "upside_range=%.4f downside_range=%.4f size=%.1f",
+            position_id, market_id, entry_price, tp, sl,
+            1.0 - entry_price, entry_price, size_shares,
+        )
+        return pos
+
+    # ── Per-tick evaluation ───────────────────────────────────────────────────
+
+    def evaluate(self, pos: Position, current_price: float) -> ExitReason:
+        """
+        Check all exit conditions against current_price.
+        Updates pos.peak_price in-place for trailing stop tracking.
+
+        Priority order:
+          0. Daily loss circuit breaker  (portfolio-level)
+          1. Market resolution blackout  (market-level)
+          2. Take profit                 (position-level)
+          3. Hard stop loss              (position-level)
+          4. Trailing stop               (position-level, only after a new high)
+          5. Time exit                   (position-level, stale trade cleanup)
+        """
+        _assert_valid_price(current_price, "current_price")
+        self._maybe_reset_daily_window()
+
+        # 0 ── Daily loss circuit breaker ─────────────────────────────────────
+        daily_loss_limit = -(self.bankroll * self.cfg.daily_loss_limit_pct)
+        if self._daily_pnl <= daily_loss_limit:
+            logger.warning(
+                "DAILY LOSS LIMIT | daily_pnl=%.2f limit=%.2f bankroll=%.2f",
+                self._daily_pnl, daily_loss_limit, self.bankroll,
+            )
+            return ExitReason.DAILY_LOSS_LIMIT
+
+        # 1 ── Market resolution blackout ──────────────────────────────────────
+        if pos.resolve_time is not None:
+            hours_to_resolve = (pos.resolve_time - time.time()) / 3_600.0
+            if 0.0 < hours_to_resolve < self.cfg.resolution_blackout_hours:
+                logger.info(
+                    "RESOLUTION BLACKOUT | id=%s mkt=%s resolves_in=%.1fh",
+                    pos.position_id, pos.market_id, hours_to_resolve,
+                )
+                return ExitReason.MARKET_RESOLVING
+
+        # 2 ── Update trailing peak ────────────────────────────────────────────
+        if current_price > pos.peak_price:
+            pos.peak_price = current_price
+
+        # 3 ── Take profit ──────────────────────────────────────────────────────
+        if current_price >= pos.tp_price:
+            logger.info(
+                "TAKE PROFIT | id=%s price=%.4f tp=%.4f gain_pct=%.1f%%",
+                pos.position_id, current_price, pos.tp_price,
+                (current_price - pos.entry_price) / pos.entry_price * 100,
+            )
             return ExitReason.TAKE_PROFIT
 
-        # Stop loss at 5%
-        if pnl_pct <= -self.risk.stop_loss_pct:
-            logger.info("STOP_LOSS triggered: %.1f%% <= -%.1f%% on %s", pnl_pct * 100, self.risk.stop_loss_pct * 100, position.market_id)
+        # 4 ── Hard stop loss ──────────────────────────────────────────────────
+        if current_price <= pos.sl_price:
+            logger.info(
+                "STOP LOSS | id=%s price=%.4f sl=%.4f loss_pct=%.1f%%",
+                pos.position_id, current_price, pos.sl_price,
+                (current_price - pos.entry_price) / pos.entry_price * 100,
+            )
             return ExitReason.STOP_LOSS
 
-        # Trailing stop: 10% drop from peak
-        if position.peak_price > 0:
-            drop = position.drop_from_peak_pct
-            if drop >= self.risk.trailing_stop_pct:
-                logger.info("TRAILING_STOP triggered: %.1f%% drop from peak on %s", drop * 100, position.market_id)
+        # 5 ── Trailing stop (only after price made a new high above entry) ────
+        if pos.peak_price > pos.entry_price:
+            trail_sl = self._compute_trail_sl(pos)
+            if current_price <= trail_sl:
+                logger.info(
+                    "TRAILING STOP | id=%s price=%.4f peak=%.4f trail_sl=%.4f",
+                    pos.position_id, current_price, pos.peak_price, trail_sl,
+                )
                 return ExitReason.TRAILING_STOP
 
-        # Time-based exit: 48h if flat (<3% move)
-        if position.age_hours >= self.risk.time_exit_hours:
-            if abs(pnl_pct) < self.risk.time_exit_min_move:
-                logger.info("TIME_EXIT triggered: %.1fh old with only %.1f%% move on %s", position.age_hours, pnl_pct * 100, position.market_id)
+        # 6 ── Time exit: stale trade with minimal range movement ──────────────
+        elapsed_hours = (time.time() - pos.entry_time) / 3_600.0
+        if elapsed_hours >= self.cfg.time_exit_hours:
+            working_range = max(pos.tp_price - pos.sl_price, _EPSILON)
+            range_move    = abs(current_price - pos.entry_price) / working_range
+            if range_move < self.cfg.time_exit_min_range_move:
+                logger.info(
+                    "TIME EXIT | id=%s elapsed=%.1fh range_move=%.3f threshold=%.3f",
+                    pos.position_id, elapsed_hours, range_move,
+                    self.cfg.time_exit_min_range_move,
+                )
                 return ExitReason.TIME_EXIT
 
-        return None
+        return ExitReason.HOLD
 
-    def can_open_position(self, trade: Trade, open_positions: list[Position]) -> tuple[bool, str]:
-        """Check if we're allowed to open a new position."""
-        self.reset_daily_if_needed()
+    # ── Record a closed position ───────────────────────────────────────────────
 
-        # Daily loss limit
-        if self.daily_pnl <= -(self.risk.daily_loss_limit_pct * self.bankroll):
-            return False, f"Daily loss limit hit: ${self.daily_pnl:.2f}"
+    def record_exit(self, pos: Position, exit_price: float) -> float:
+        """
+        Call after a position closes (any ExitReason except HOLD).
+        Updates bankroll, daily PnL, and releases market exposure.
+        Returns realized PnL (negative = loss).
+        """
+        pnl = pos.pnl_at(exit_price)
+        self._daily_pnl  += pnl
+        self.bankroll    += pnl
 
-        # Cooldown after consecutive losses
-        if time.time() < self.cooldown_until:
-            remaining = (self.cooldown_until - time.time()) / 60
-            return False, f"In cooldown: {remaining:.0f} min remaining"
-
-        # Max concurrent positions
-        if len(open_positions) >= self.copy.max_concurrent_positions:
-            return False, f"Max positions ({self.copy.max_concurrent_positions}) reached"
-
-        # Per-trader drawdown stop
-        trader_addr = trade.trader_address
-        trader_cumulative = self.trader_pnl.get(trader_addr, 0.0)
-        if trader_cumulative <= -(self.risk.drawdown_stop_pct * self.bankroll):
-            return False, f"Trader {trader_addr[:10]} drawdown stop: ${trader_cumulative:.2f}"
-
-        # Per-trader allocation cap
-        trader_exposure = sum(
-            p.size * p.entry_price
-            for p in open_positions
-            if p.source_trader == trader_addr
+        released = pos.entry_price * pos.size_shares
+        self._market_exposure[pos.market_id] = max(
+            0.0,
+            self._market_exposure.get(pos.market_id, 0.0) - released,
         )
-        max_allocation = self.copy.max_trader_allocation * self.bankroll
-        if trader_exposure >= max_allocation:
-            return False, f"Trader {trader_addr[:10]} allocation cap (${max_allocation:.2f}) reached"
 
-        return True, ""
+        logger.info(
+            "record_exit | id=%s exit=%.4f pnl=%+.4f daily_pnl=%+.4f bankroll=%.2f",
+            pos.position_id, exit_price, pnl, self._daily_pnl, self.bankroll,
+        )
+        return pnl
 
-    def calculate_copy_size(self, original_size: float) -> float:
-        """Calculate conservative copy size: min(0.5x original, 2% bankroll)."""
-        scaled = original_size * self.copy.size_multiplier
-        max_size = self.copy.max_trade_pct * self.bankroll
-        return min(scaled, max_size)
+    # ── Public helpers ────────────────────────────────────────────────────────
 
-    def check_price_deviation(self, trade_price: float, current_price: float) -> bool:
-        """Return True if the current price is within acceptable deviation of the trade price."""
-        if trade_price == 0:
-            return False
-        deviation = abs(current_price - trade_price) / trade_price
-        return deviation <= self.copy.max_price_deviation
+    def market_exposure(self, market_id: str) -> float:
+        """Current $ allocated in a given market."""
+        return self._market_exposure.get(market_id, 0.0)
 
-    def record_trade_result(self, pnl: float, trader_address: str) -> None:
-        """Record the result of a closed trade for risk tracking."""
-        self.daily_pnl += pnl
-        self.trader_pnl[trader_address] = self.trader_pnl.get(trader_address, 0.0) + pnl
+    def market_exposure_cap(self) -> float:
+        """Current cap in $ terms (changes as bankroll changes)."""
+        return self.bankroll * self.cfg.max_market_exposure_pct
 
-        if pnl < 0:
-            self.consecutive_losses += 1
-            if self.consecutive_losses >= self.risk.cooldown_after_losses:
-                self.cooldown_until = time.time() + self.risk.cooldown_minutes * 60
-                logger.warning(
-                    "Cooldown activated: %d consecutive losses, pausing for %d min",
-                    self.consecutive_losses,
-                    self.risk.cooldown_minutes,
-                )
-        else:
-            self.consecutive_losses = 0
+    def daily_pnl(self) -> float:
+        return self._daily_pnl
+
+    # ── Internal threshold computation ────────────────────────────────────────
+
+    def _compute_thresholds(self, entry: float) -> Tuple[float, float]:
+        """
+        Range-relative TP and SL with absolute minimum guards.
+
+        TP = entry + max(dist_to_ceil × tp_fraction,  min_tp_abs), then clamped ≤ 1.0
+        SL = entry − max(dist_to_floor × sl_fraction, min_sl_abs), then clamped ≥ 0.0
+        """
+        dist_ceil  = 1.0 - entry   # remaining upside
+        dist_floor = entry         # remaining downside
+
+        tp_raw = entry + max(dist_ceil  * self.cfg.tp_range_fraction, self.cfg.min_tp_abs)
+        sl_raw = entry - max(dist_floor * self.cfg.sl_range_fraction, self.cfg.min_sl_abs)
+
+        tp = min(tp_raw, 1.0)
+        sl = max(sl_raw, 0.0)
+
+        return round(tp, 6), round(sl, 6)
+
+    def _compute_trail_sl(self, pos: Position) -> float:
+        """
+        Trailing SL = peak − (peak − hard_SL) × trailing_fraction.
+        Never drops below the hard SL.
+        """
+        gap      = pos.peak_price - pos.sl_price
+        trail_sl = pos.peak_price - (gap * self.cfg.trailing_stop_fraction)
+        return max(trail_sl, pos.sl_price)
+
+    def _assert_exposure_cap(self, market_id: str, new_value: float) -> None:
+        cap     = self.market_exposure_cap()
+        current = self._market_exposure.get(market_id, 0.0)
+        if current + new_value > cap:
+            raise ExposureCapError(
+                f"Market {market_id}: existing=${current:.2f} + new=${new_value:.2f} "
+                f"= ${current + new_value:.2f} > cap=${cap:.2f} "
+                f"({self.cfg.max_market_exposure_pct * 100:.0f}% of ${self.bankroll:.2f})"
+            )
+
+    def _maybe_reset_daily_window(self) -> None:
+        if time.time() >= self._day_start_ts + 86_400:
+            logger.info("Daily PnL window reset. Previous daily_pnl=%.2f", self._daily_pnl)
+            self._daily_pnl    = 0.0
+            self._day_start_ts = _midnight_utc()
+
+
+# ─── Module-level helpers ──────────────────────────────────────────────────────
+
+def _assert_valid_price(price: float, name: str = "price") -> None:
+    if not (0.0 <= price <= 1.0):
+        raise InvalidPriceError(
+            f"{name} must be in [0.0, 1.0] (Polymarket token range). Got: {price!r}"
+        )
+
+
+def _midnight_utc() -> float:
+    """Unix timestamp of midnight UTC of the current day."""
+    t = time.gmtime()
+    return float(
+        time.mktime(
+            time.struct_time((t.tm_year, t.tm_mon, t.tm_mday, 0, 0, 0, 0, 0, 0))
+        )
+    )

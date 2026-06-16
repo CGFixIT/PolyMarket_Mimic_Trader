@@ -1,144 +1,168 @@
-"""Portfolio state tracking and persistence."""
+"""Portfolio state tracking with SQLite persistence (aiosqlite, WAL mode)."""
 
 from __future__ import annotations
 
-import json
 import logging
-from pathlib import Path
-from typing import Optional
+import os
+import time
+from typing import List, Optional
 
-from polymarket_copier.models.types import ExitReason, Position, TradeSide
+import aiosqlite
+
+from polymarket_copier.core.risk_manager import ExitReason, Position, Side
 
 logger = logging.getLogger("polymarket_copier")
 
-DEFAULT_STATE_FILE = "portfolio_state.json"
+_SCHEMA = """
+CREATE TABLE IF NOT EXISTS positions (
+    position_id     TEXT PRIMARY KEY,
+    market_id       TEXT NOT NULL,
+    token_id        TEXT NOT NULL,
+    trader_address  TEXT NOT NULL,
+    entry_price     REAL NOT NULL,
+    tp_price        REAL NOT NULL,
+    sl_price        REAL NOT NULL,
+    peak_price      REAL NOT NULL,
+    size_shares     REAL NOT NULL,
+    entry_time      REAL NOT NULL,
+    resolve_time    REAL,
+    status          TEXT NOT NULL DEFAULT 'open',
+    exit_price      REAL,
+    exit_reason     TEXT,
+    realized_pnl    REAL,
+    closed_at       REAL
+);
+"""
 
 
-class Portfolio:
-    """Tracks all open positions and provides P&L reporting."""
+class PortfolioManager:
+    """SQLite-backed store of open and closed copy-trade positions."""
 
-    def __init__(self, state_file: str = DEFAULT_STATE_FILE):
-        self.positions: dict[str, Position] = {}
-        self.closed_pnl: float = 0.0
-        self.total_trades: int = 0
-        self.winning_trades: int = 0
-        self.state_file = state_file
+    def __init__(self, db_path: str = "data/positions.db"):
+        self._db_path = db_path
+        self._db: Optional[aiosqlite.Connection] = None
 
-    def add_position(self, position: Position) -> None:
-        """Add a new open position."""
-        self.positions[position.id] = position
-        self.total_trades += 1
-        logger.info(
-            "Position opened: %s %s %.4f @ %.4f on %s (from %s)",
-            position.side.value,
-            position.outcome or position.asset_id[:10],
-            position.size,
-            position.entry_price,
-            position.market_slug or position.market_id[:10],
-            position.source_trader[:10],
+    async def init(self) -> None:
+        os.makedirs(os.path.dirname(self._db_path) or ".", exist_ok=True)
+        self._db = await aiosqlite.connect(self._db_path)
+        await self._db.execute("PRAGMA journal_mode=WAL;")
+        await self._db.executescript(_SCHEMA)
+        await self._db.commit()
+        logger.info("Portfolio DB initialized: %s", self._db_path)
+
+    async def close(self) -> None:
+        if self._db:
+            await self._db.close()
+
+    async def open_position(self, pos: Position) -> None:
+        await self._db.execute(
+            """INSERT INTO positions
+               (position_id, market_id, token_id, trader_address, entry_price,
+                tp_price, sl_price, peak_price, size_shares, entry_time, resolve_time, status)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'open')""",
+            (pos.position_id, pos.market_id, pos.token_id, pos.trader_address,
+             pos.entry_price, pos.tp_price, pos.sl_price, pos.peak_price,
+             pos.size_shares, pos.entry_time, pos.resolve_time),
         )
-        self.save()
+        await self._db.commit()
+        logger.info("Position opened in DB: %s", pos.position_id)
 
-    def close_position(self, position_id: str, exit_price: float, reason: ExitReason) -> Optional[float]:
-        """Close a position and return the realized P&L."""
-        position = self.positions.pop(position_id, None)
-        if position is None:
+    async def close_position(
+        self, position_id: str, exit_price: float, reason: ExitReason,
+    ) -> float:
+        pos = await self.get_position(position_id)
+        if pos is None:
             logger.warning("Position %s not found for closing", position_id)
-            return None
-
-        position.current_price = exit_price
-        pnl = position.unrealized_pnl
-        self.closed_pnl += pnl
-
-        if pnl > 0:
-            self.winning_trades += 1
-
-        logger.info(
-            "Position closed [%s]: %s %.4f @ %.4f -> %.4f | PnL=$%.2f (%.1f%%)",
-            reason.value,
-            position.side.value,
-            position.size,
-            position.entry_price,
-            exit_price,
-            pnl,
-            position.unrealized_pnl_pct * 100,
+            return 0.0
+        pnl = pos.pnl_at(exit_price)
+        await self._db.execute(
+            """UPDATE positions SET status='closed', exit_price=?, exit_reason=?,
+               realized_pnl=?, closed_at=? WHERE position_id=?""",
+            (exit_price, reason.name, pnl, time.time(), position_id),
         )
-        self.save()
+        await self._db.commit()
+        logger.info("Position closed: %s reason=%s pnl=%.4f", position_id, reason.name, pnl)
         return pnl
 
-    def update_prices(self, prices: dict[str, float]) -> None:
-        """Update current prices for all open positions."""
-        for pos in self.positions.values():
-            price = prices.get(pos.asset_id) or prices.get(pos.market_id)
-            if price is not None:
-                pos.update_price(price)
+    async def get_open_positions(self) -> List[Position]:
+        cursor = await self._db.execute("SELECT * FROM positions WHERE status='open'")
+        rows = await cursor.fetchall()
+        return [_row_to_position(row) for row in rows]
 
-    @property
-    def open_positions(self) -> list[Position]:
-        return list(self.positions.values())
+    async def get_position(self, position_id: str) -> Optional[Position]:
+        cursor = await self._db.execute(
+            "SELECT * FROM positions WHERE position_id=?", (position_id,)
+        )
+        row = await cursor.fetchone()
+        if row is None:
+            return None
+        return _row_to_position(row)
 
-    @property
-    def unrealized_pnl(self) -> float:
-        return sum(p.unrealized_pnl for p in self.positions.values())
+    async def get_position_by_token(self, token_id: str) -> Optional[Position]:
+        cursor = await self._db.execute(
+            "SELECT * FROM positions WHERE token_id=? AND status='open'", (token_id,)
+        )
+        row = await cursor.fetchone()
+        if row is None:
+            return None
+        return _row_to_position(row)
 
-    @property
-    def total_pnl(self) -> float:
-        return self.closed_pnl + self.unrealized_pnl
+    async def position_count(self) -> int:
+        cursor = await self._db.execute(
+            "SELECT COUNT(*) FROM positions WHERE status='open'"
+        )
+        row = await cursor.fetchone()
+        return row[0] if row else 0
 
-    @property
-    def win_rate(self) -> float:
-        if self.total_trades == 0:
-            return 0.0
-        return self.winning_trades / self.total_trades
+    async def update_peak_price(self, position_id: str, peak_price: float) -> None:
+        await self._db.execute(
+            "UPDATE positions SET peak_price=? WHERE position_id=?",
+            (peak_price, position_id),
+        )
+        await self._db.commit()
 
-    def get_trader_positions(self, trader_address: str) -> list[Position]:
-        """Get all open positions for a specific followed trader."""
-        return [p for p in self.positions.values() if p.source_trader == trader_address]
+    async def get_trader_pnl(self, trader_address: str) -> float:
+        cursor = await self._db.execute(
+            "SELECT COALESCE(SUM(realized_pnl), 0) FROM positions "
+            "WHERE trader_address=? AND status='closed'",
+            (trader_address,),
+        )
+        row = await cursor.fetchone()
+        return float(row[0]) if row else 0.0
 
-    def save(self) -> None:
-        """Persist portfolio state to JSON file."""
-        state = {
-            "positions": {pid: p.model_dump() for pid, p in self.positions.items()},
-            "closed_pnl": self.closed_pnl,
-            "total_trades": self.total_trades,
-            "winning_trades": self.winning_trades,
-        }
-        try:
-            Path(self.state_file).write_text(json.dumps(state, indent=2, default=str))
-        except Exception as e:
-            logger.error("Failed to save portfolio state: %s", e)
+    async def summary(self) -> str:
+        open_count = await self.position_count()
+        cursor = await self._db.execute(
+            "SELECT COUNT(*), COALESCE(SUM(realized_pnl), 0), "
+            "SUM(CASE WHEN realized_pnl > 0 THEN 1 ELSE 0 END) "
+            "FROM positions WHERE status='closed'"
+        )
+        row = await cursor.fetchone()
+        total    = row[0] if row else 0
+        realized = row[1] if row else 0
+        wins     = row[2] if row and row[2] is not None else 0
+        wr = (wins / total * 100) if total > 0 else 0
+        return (
+            "=== Portfolio Summary ===\n"
+            f"Open positions: {open_count}\n"
+            f"Closed trades: {total}\n"
+            f"Win rate: {wr:.1f}%\n"
+            f"Realized P&L: ${realized:.2f}"
+        )
 
-    def load(self) -> None:
-        """Load portfolio state from JSON file."""
-        path = Path(self.state_file)
-        if not path.exists():
-            return
-        try:
-            state = json.loads(path.read_text())
-            self.closed_pnl = state.get("closed_pnl", 0.0)
-            self.total_trades = state.get("total_trades", 0)
-            self.winning_trades = state.get("winning_trades", 0)
-            for pid, pdata in state.get("positions", {}).items():
-                self.positions[pid] = Position(**pdata)
-            logger.info("Loaded %d positions from state file", len(self.positions))
-        except Exception as e:
-            logger.error("Failed to load portfolio state: %s", e)
 
-    def summary(self) -> str:
-        """Return a human-readable portfolio summary."""
-        lines = [
-            "=== Portfolio Summary ===",
-            f"Open positions: {len(self.positions)}",
-            f"Total trades: {self.total_trades}",
-            f"Win rate: {self.win_rate:.1%}",
-            f"Realized P&L: ${self.closed_pnl:.2f}",
-            f"Unrealized P&L: ${self.unrealized_pnl:.2f}",
-            f"Total P&L: ${self.total_pnl:.2f}",
-        ]
-        for p in self.positions.values():
-            lines.append(
-                f"  {p.side.value} {p.outcome or p.asset_id[:10]} | "
-                f"Size={p.size:.4f} | Entry={p.entry_price:.4f} | "
-                f"Current={p.current_price:.4f} | PnL={p.unrealized_pnl_pct:.1%}"
-            )
-        return "\n".join(lines)
+def _row_to_position(row) -> Position:
+    return Position(
+        position_id=row[0],
+        market_id=row[1],
+        token_id=row[2],
+        trader_address=row[3],
+        entry_price=row[4],
+        tp_price=row[5],
+        sl_price=row[6],
+        peak_price=row[7],
+        size_shares=row[8],
+        entry_time=row[9],
+        resolve_time=row[10],
+        side=Side.BUY,
+    )

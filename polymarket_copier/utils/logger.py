@@ -1,14 +1,32 @@
-"""Structured logging setup for the copy trading bot."""
+"""Structured JSON logging for the copy trading bot."""
 
 from __future__ import annotations
 
+import json
 import logging
 import sys
+from logging.handlers import RotatingFileHandler
 from pathlib import Path
 
 
-def setup_logger(name: str = "polymarket_copier", level: str = "INFO", log_file: str = "trades.log") -> logging.Logger:
-    """Configure and return the application logger."""
+class JsonFormatter(logging.Formatter):
+    def format(self, record: logging.LogRecord) -> str:
+        log_entry = {
+            "time": self.formatTime(record, self.datefmt),
+            "level": record.levelname,
+            "module": record.module,
+            "msg": record.getMessage(),
+        }
+        if hasattr(record, "data"):
+            log_entry["data"] = record.data
+        return json.dumps(log_entry)
+
+
+def setup_logger(
+    name: str = "polymarket_copier",
+    level: str = "INFO",
+    log_file: str = "trades.log",
+) -> logging.Logger:
     logger = logging.getLogger(name)
 
     if logger.handlers:
@@ -16,21 +34,18 @@ def setup_logger(name: str = "polymarket_copier", level: str = "INFO", log_file:
 
     logger.setLevel(getattr(logging, level.upper(), logging.INFO))
 
-    formatter = logging.Formatter(
-        "%(asctime)s | %(levelname)-8s | %(name)s | %(message)s",
-        datefmt="%Y-%m-%d %H:%M:%S",
-    )
+    formatter = JsonFormatter(datefmt="%Y-%m-%dT%H:%M:%S")
 
-    # Console handler
     console = logging.StreamHandler(sys.stdout)
     console.setFormatter(formatter)
     logger.addHandler(console)
 
-    # File handler
     if log_file:
         log_path = Path(log_file)
         log_path.parent.mkdir(parents=True, exist_ok=True)
-        file_handler = logging.FileHandler(log_path)
+        file_handler = RotatingFileHandler(
+            log_path, maxBytes=10_000_000, backupCount=5,
+        )
         file_handler.setFormatter(formatter)
         logger.addHandler(file_handler)
 

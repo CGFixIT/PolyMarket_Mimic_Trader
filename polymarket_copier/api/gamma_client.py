@@ -3,9 +3,12 @@
 from __future__ import annotations
 
 import logging
+from datetime import datetime, timezone
 from typing import Any, Optional
 
 import aiohttp
+
+from polymarket_copier.models.types import Market
 
 logger = logging.getLogger("polymarket_copier")
 
@@ -37,29 +40,22 @@ class GammaClient:
             resp.raise_for_status()
             return await resp.json()
 
-    async def get_markets(self, limit: int = 50, active: bool = True) -> list[dict[str, Any]]:
-        """Fetch available markets."""
-        params: dict[str, Any] = {"limit": limit}
-        if active:
-            params["active"] = "true"
+    async def get_active_markets(self, limit: int = 100) -> list[Market]:
+        """Fetch active markets as typed Market objects (with resolve_time)."""
+        params: dict[str, Any] = {"limit": limit, "active": "true"}
         data = await self._get("/markets", params=params)
-        if isinstance(data, list):
-            return data
-        return data.get("markets", data.get("data", []))
+        raw_list = data if isinstance(data, list) else data.get("markets", data.get("data", []))
+        return [_parse_market(raw) for raw in raw_list]
 
-    async def get_market(self, market_id: str) -> dict[str, Any]:
-        """Fetch a single market by ID or slug."""
-        data = await self._get(f"/markets/{market_id}")
-        if isinstance(data, dict):
-            return data
-        return {}
-
-    async def get_events(self, limit: int = 50) -> list[dict[str, Any]]:
-        """Fetch events (groups of related markets)."""
-        data = await self._get("/events", params={"limit": limit})
-        if isinstance(data, list):
-            return data
-        return data.get("events", data.get("data", []))
+    async def get_market(self, condition_id: str) -> Optional[Market]:
+        """Fetch a single market by condition ID or slug."""
+        try:
+            data = await self._get(f"/markets/{condition_id}")
+            if isinstance(data, dict):
+                return _parse_market(data)
+        except Exception:
+            logger.warning("Failed to fetch market %s", condition_id)
+        return None
 
     async def get_market_price(self, token_id: str) -> Optional[float]:
         """Get the current mid price for a token."""
@@ -72,3 +68,43 @@ class GammaClient:
         except Exception:
             logger.warning("Failed to get price for token %s", token_id)
         return None
+
+
+def _parse_resolve_time(raw: dict) -> Optional[datetime]:
+    """Extract market resolution time from various possible field names."""
+    for field_name in ("endDate", "resolutionTime", "end_date", "resolution_time"):
+        val = raw.get(field_name)
+        if val is None:
+            continue
+        try:
+            if isinstance(val, str):
+                return datetime.fromisoformat(val.replace("Z", "+00:00"))
+            elif isinstance(val, (int, float)):
+                ts = val / 1000.0 if val > 1e12 else float(val)
+                return datetime.fromtimestamp(ts, tz=timezone.utc)
+        except (ValueError, OSError):
+            continue
+    return None
+
+
+def _parse_market(raw: dict) -> Market:
+    tokens = raw.get("tokens", [])
+    token_yes = ""
+    token_no = ""
+    for t in tokens:
+        outcome = str(t.get("outcome", "")).lower()
+        tid = str(t.get("token_id", t.get("tokenID", "")))
+        if outcome == "yes":
+            token_yes = tid
+        elif outcome == "no":
+            token_no = tid
+
+    return Market(
+        condition_id=str(raw.get("condition_id", raw.get("conditionId", raw.get("id", "")))),
+        question=str(raw.get("question", raw.get("title", ""))),
+        token_id_yes=token_yes or str(raw.get("token_id_yes", "")),
+        token_id_no=token_no or str(raw.get("token_id_no", "")),
+        resolve_time=_parse_resolve_time(raw),
+        volume_24h=float(raw.get("volume24hr", raw.get("volume_24h", 0)) or 0),
+        active=bool(raw.get("active", True)),
+    )

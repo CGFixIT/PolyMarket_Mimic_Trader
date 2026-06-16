@@ -1,123 +1,143 @@
-"""Tests for the trade monitor."""
+"""Tests for the v2 WebSocket-first trade monitor."""
 
 from __future__ import annotations
 
-import time
-from unittest.mock import AsyncMock
+from unittest.mock import MagicMock
 
 import pytest
 
-from polymarket_copier.core.monitor import TradeMonitor
-from polymarket_copier.models.types import TradeSide
+from polymarket_copier.core.monitor import (
+    PriceTick,
+    TradeEvent,
+    TradeMonitor,
+    TradeType,
+    _parse_trade_event,
+)
+
+
+class TestParseTradeEvent:
+    def test_parse_buy(self):
+        raw = {
+            "id": "t1", "side": "BUY", "market": "mkt-a", "asset": "tok-a",
+            "price": "0.65", "size": "100", "timestamp": 1_700_000_000,
+        }
+        event = _parse_trade_event("0xabc", raw)
+        assert event is not None
+        assert event.trade_type == TradeType.BUY
+        assert event.price == 0.65
+        assert event.size_usdc == 100
+        assert event.wallet_address == "0xabc"
+
+    def test_parse_sell(self):
+        raw = {
+            "id": "t2", "side": "SELL", "market": "mkt-a", "asset": "tok-a",
+            "price": "0.75", "size": "50", "timestamp": 1_700_000_000,
+        }
+        event = _parse_trade_event("0xabc", raw)
+        assert event.trade_type == TradeType.SELL
+
+    def test_missing_market_returns_none(self):
+        raw = {"id": "t1", "side": "BUY", "price": "0.5", "size": "10"}
+        assert _parse_trade_event("0xabc", raw) is None
+
+    def test_zero_price_returns_none(self):
+        raw = {
+            "id": "t1", "side": "BUY", "market": "m", "asset": "a",
+            "price": "0", "size": "10",
+        }
+        assert _parse_trade_event("0xabc", raw) is None
+
+    def test_millis_timestamp_normalized(self):
+        raw = {
+            "id": "t1", "side": "BUY", "market": "m", "asset": "a",
+            "price": "0.5", "size": "10", "timestamp": 1_700_000_000_000,
+        }
+        event = _parse_trade_event("0xabc", raw)
+        assert event.timestamp == pytest.approx(1_700_000_000, abs=1)
 
 
 class TestTradeMonitor:
-    @pytest.fixture
-    def monitor(self, mock_data_client):
-        return TradeMonitor(
-            data_client=mock_data_client,
-            trader_addresses=["0xaaa111", "0xbbb222"],
-            poll_interval=10,
+    def test_requires_wallets(self):
+        with pytest.raises(ValueError, match="non-empty"):
+            TradeMonitor(tracked_wallets=[], on_trade=lambda e: None)
+
+    def test_lowercases_wallets(self):
+        monitor = TradeMonitor(
+            tracked_wallets=["0xABCDEF"], on_trade=lambda e: None,
         )
+        assert monitor._wallets == ["0xabcdef"]
 
-    def test_parse_trade_buy(self, monitor):
-        raw = {
-            "id": "t1",
-            "side": "BUY",
-            "market": "market-abc",
-            "asset_id": "asset-xyz",
-            "size": 100,
-            "price": 0.65,
-            "timestamp": time.time(),
-        }
-        trade = monitor.parse_trade(raw, "0xaaa111")
-        assert trade is not None
-        assert trade.id == "t1"
-        assert trade.side == TradeSide.BUY
-        assert trade.trader_address == "0xaaa111"
-        assert trade.size == 100
-        assert trade.price == 0.65
+    def test_subscribe_unsubscribe_token(self):
+        monitor = TradeMonitor(tracked_wallets=["0xabc"], on_trade=lambda e: None)
+        monitor.subscribe_token("tok-1")
+        assert "tok-1" in monitor._subscribed_tokens
+        monitor.unsubscribe_token("tok-1")
+        assert "tok-1" not in monitor._subscribed_tokens
 
-    def test_parse_trade_sell(self, monitor):
-        raw = {"id": "t2", "side": "SELL", "market": "m1", "asset_id": "a1", "size": 50, "price": 0.75}
-        trade = monitor.parse_trade(raw, "0xaaa111")
-        assert trade.side == TradeSide.SELL
-
-    def test_parse_trade_alternative_side_names(self, monitor):
-        for side_name, expected in [("LONG", TradeSide.BUY), ("YES", TradeSide.BUY), ("SHORT", TradeSide.SELL)]:
-            raw = {"id": f"t-{side_name}", "type": side_name, "market": "m1", "asset_id": "a1", "size": 10, "price": 0.5}
-            trade = monitor.parse_trade(raw, "0x")
-            assert trade.side == expected
-
-    def test_parse_trade_no_id(self, monitor):
-        raw = {"side": "BUY", "size": 100, "price": 0.5}
-        trade = monitor.parse_trade(raw, "0x")
-        assert trade is None
-
-    @pytest.mark.asyncio
-    async def test_detects_new_trade(self, monitor, mock_data_client, sample_raw_trades):
-        mock_data_client.get_trades.return_value = sample_raw_trades
-        new_trades = await monitor.poll_trader("0xaaa111")
-        assert len(new_trades) == 3
-        assert new_trades[0].id == "t1"
-
-    @pytest.mark.asyncio
-    async def test_ignores_duplicate_trade(self, monitor, mock_data_client, sample_raw_trades):
-        mock_data_client.get_trades.return_value = sample_raw_trades
-
-        # First poll — discovers 3 trades
-        first = await monitor.poll_trader("0xaaa111")
-        assert len(first) == 3
-
-        # Second poll — same trades, should be empty
-        second = await monitor.poll_trader("0xaaa111")
+    def test_filter_new_trades_dedup(self):
+        monitor = TradeMonitor(tracked_wallets=["0xabc"], on_trade=lambda e: None)
+        activity = [
+            {"id": "t1", "type": "trade", "side": "BUY"},
+            {"id": "t2", "type": "trade", "side": "SELL"},
+        ]
+        first = monitor._filter_new_trades("0xabc", activity)
+        assert len(first) == 2
+        # Second pass: all already seen
+        second = monitor._filter_new_trades("0xabc", activity)
         assert len(second) == 0
 
-    @pytest.mark.asyncio
-    async def test_detects_only_new_after_initial(self, monitor, mock_data_client, sample_raw_trades):
-        mock_data_client.get_trades.return_value = sample_raw_trades[:2]
-        first = await monitor.poll_trader("0xaaa111")
-        assert len(first) == 2
+    def test_filter_ignores_non_trades(self):
+        monitor = TradeMonitor(tracked_wallets=["0xabc"], on_trade=lambda e: None)
+        activity = [
+            {"id": "x1", "type": "transfer"},
+            {"id": "t1", "type": "trade", "side": "BUY"},
+        ]
+        new = monitor._filter_new_trades("0xabc", activity)
+        assert len(new) == 1
+        assert new[0]["id"] == "t1"
 
-        # Add a new trade
-        mock_data_client.get_trades.return_value = sample_raw_trades
-        second = await monitor.poll_trader("0xaaa111")
-        assert len(second) == 1
-        assert second[0].id == "t3"
+    def test_handle_ws_message_emits_price_tick(self):
+        ticks = []
+        monitor = TradeMonitor(
+            tracked_wallets=["0xabc"],
+            on_trade=lambda e: None,
+            on_price=lambda t: ticks.append(t),
+        )
+        monitor.subscribe_token("tok-a")
+        import json
+        raw = json.dumps([
+            {"event_type": "price_change", "asset_id": "tok-a", "price": "0.55"}
+        ])
+        monitor._handle_ws_message(raw)
+        assert len(ticks) == 1
+        assert isinstance(ticks[0], PriceTick)
+        assert ticks[0].price == 0.55
 
-    @pytest.mark.asyncio
-    async def test_classifies_buy_and_sell(self, monitor, mock_data_client, sample_raw_trades):
-        mock_data_client.get_trades.return_value = sample_raw_trades
-        trades = await monitor.poll_trader("0xaaa111")
-        assert trades[0].side == TradeSide.BUY
-        assert trades[1].side == TradeSide.SELL
-        assert trades[2].side == TradeSide.BUY
+    def test_handle_ws_message_ignores_unsubscribed(self):
+        ticks = []
+        monitor = TradeMonitor(
+            tracked_wallets=["0xabc"],
+            on_trade=lambda e: None,
+            on_price=lambda t: ticks.append(t),
+        )
+        import json
+        raw = json.dumps([
+            {"event_type": "price_change", "asset_id": "other-tok", "price": "0.55"}
+        ])
+        monitor._handle_ws_message(raw)
+        assert len(ticks) == 0
 
-    @pytest.mark.asyncio
-    async def test_poll_all_concurrent(self, monitor, mock_data_client, sample_raw_trades):
-        mock_data_client.get_trades.return_value = sample_raw_trades
-        all_trades = await monitor.poll_all()
-        # 3 trades * 2 traders = 6 (each trader returns same trades with different IDs)
-        assert len(all_trades) == 3  # Same trade IDs so deduped within each trader, but shared across
-
-    @pytest.mark.asyncio
-    async def test_poll_error_handled(self, monitor, mock_data_client):
-        mock_data_client.get_trades.side_effect = Exception("API timeout")
-        trades = await monitor.poll_trader("0xaaa111")
-        assert trades == []
-
-    def test_stop(self, monitor):
-        monitor._running = True
-        monitor.stop()
-        assert monitor._running is False
-
-    @pytest.mark.asyncio
-    async def test_on_trade_callback(self, monitor, mock_data_client, sample_raw_trades):
-        callback = AsyncMock()
-        monitor.on_trade = callback
-        mock_data_client.get_trades.return_value = sample_raw_trades[:1]
-
-        trades = await monitor.poll_all()
-        # Callback isn't called during poll_all, only during run()
-        # But we verify trades are detected
-        assert len(trades) > 0
+    def test_handle_ws_message_rejects_out_of_range_price(self):
+        ticks = []
+        monitor = TradeMonitor(
+            tracked_wallets=["0xabc"],
+            on_trade=lambda e: None,
+            on_price=lambda t: ticks.append(t),
+        )
+        monitor.subscribe_token("tok-a")
+        import json
+        raw = json.dumps([
+            {"event_type": "price_change", "asset_id": "tok-a", "price": "1.5"}
+        ])
+        monitor._handle_ws_message(raw)
+        assert len(ticks) == 0

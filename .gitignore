@@ -25,6 +25,13 @@ env/
 # Logs & state
 *.log
 portfolio_state.json
+data/
+*.db
+*.db-wal
+*.db-shm
+
+# Claude local worktrees & settings
+.claude/
 
 # Testing
 .pytest_cache/

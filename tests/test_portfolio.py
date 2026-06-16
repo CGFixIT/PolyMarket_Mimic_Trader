@@ -1,154 +1,119 @@
-"""Tests for portfolio state tracking and persistence."""
+"""Tests for the v2 SQLite-backed portfolio manager."""
 
 from __future__ import annotations
 
-import json
-import time
-
 import pytest
 
-from polymarket_copier.core.portfolio import Portfolio
-from polymarket_copier.models.types import ExitReason, Position, TradeSide
+from polymarket_copier.core.portfolio import PortfolioManager
+from polymarket_copier.core.risk_manager import ExitReason, RiskConfig, RiskManager
 
 
-class TestPortfolio:
-    @pytest.fixture
-    def portfolio(self, tmp_path):
-        return Portfolio(state_file=str(tmp_path / "test_state.json"))
+@pytest.fixture
+def rm() -> RiskManager:
+    return RiskManager(config=RiskConfig(), bankroll=10_000.0)
 
-    def test_add_position(self, portfolio, sample_position):
-        portfolio.add_position(sample_position)
-        assert len(portfolio.positions) == 1
-        assert portfolio.total_trades == 1
 
-    def test_close_position_profit(self, portfolio, sample_position):
-        sample_position.entry_price = 0.50
-        sample_position.current_price = 0.60
-        portfolio.add_position(sample_position)
+@pytest.fixture
+async def portfolio(tmp_path):
+    pm = PortfolioManager(db_path=str(tmp_path / "test_positions.db"))
+    await pm.init()
+    yield pm
+    await pm.close()
 
-        pnl = portfolio.close_position(sample_position.id, 0.60, ExitReason.TAKE_PROFIT)
-        assert pnl is not None
-        assert pnl > 0
-        assert len(portfolio.positions) == 0
-        assert portfolio.winning_trades == 1
 
-    def test_close_position_loss(self, portfolio, sample_position):
-        sample_position.entry_price = 0.50
-        sample_position.current_price = 0.45
-        portfolio.add_position(sample_position)
+def make_position(rm, entry=0.50, market_id="mkt-a", size=100.0, trader="0xtrader"):
+    return rm.build_position(
+        position_id=f"pos-{market_id}-{entry}",
+        market_id=market_id,
+        token_id=f"tok-{market_id}",
+        trader_address=trader,
+        entry_price=entry,
+        size_shares=size,
+    )
 
-        pnl = portfolio.close_position(sample_position.id, 0.45, ExitReason.STOP_LOSS)
-        assert pnl is not None
-        assert pnl < 0
-        assert portfolio.winning_trades == 0
 
-    def test_close_nonexistent_position(self, portfolio):
-        result = portfolio.close_position("nonexistent", 0.5, ExitReason.MANUAL)
-        assert result is None
+class TestPortfolioManager:
+    @pytest.mark.asyncio
+    async def test_open_and_count(self, portfolio, rm):
+        pos = make_position(rm)
+        await portfolio.open_position(pos)
+        assert await portfolio.position_count() == 1
 
-    def test_unrealized_pnl(self, portfolio):
-        pos = Position(
-            id="p1", market_id="m1", asset_id="a1",
-            side=TradeSide.BUY, size=100,
-            entry_price=0.50, current_price=0.55, peak_price=0.55,
-        )
-        portfolio.add_position(pos)
-        assert portfolio.unrealized_pnl == pytest.approx(5.0, abs=0.1)
+    @pytest.mark.asyncio
+    async def test_get_position(self, portfolio, rm):
+        pos = make_position(rm)
+        await portfolio.open_position(pos)
+        fetched = await portfolio.get_position(pos.position_id)
+        assert fetched is not None
+        assert fetched.entry_price == 0.50
+        assert fetched.tp_price == pos.tp_price
 
-    def test_total_pnl(self, portfolio):
-        pos1 = Position(
-            id="p1", market_id="m1", asset_id="a1",
-            side=TradeSide.BUY, size=100,
-            entry_price=0.50, current_price=0.55, peak_price=0.55,
-        )
-        portfolio.add_position(pos1)
-        portfolio.close_position("p1", 0.55, ExitReason.TAKE_PROFIT)
+    @pytest.mark.asyncio
+    async def test_get_position_by_token(self, portfolio, rm):
+        pos = make_position(rm)
+        await portfolio.open_position(pos)
+        fetched = await portfolio.get_position_by_token(pos.token_id)
+        assert fetched is not None
+        assert fetched.position_id == pos.position_id
 
-        pos2 = Position(
-            id="p2", market_id="m2", asset_id="a2",
-            side=TradeSide.BUY, size=100,
-            entry_price=0.50, current_price=0.52, peak_price=0.52,
-        )
-        portfolio.add_position(pos2)
+    @pytest.mark.asyncio
+    async def test_close_position_profit(self, portfolio, rm):
+        pos = make_position(rm, entry=0.50, size=1000.0)
+        await portfolio.open_position(pos)
+        pnl = await portfolio.close_position(pos.position_id, 0.60, ExitReason.TAKE_PROFIT)
+        assert pnl == pytest.approx(100.0)  # (0.60-0.50)*1000
+        assert await portfolio.position_count() == 0
 
-        # Total = closed (5.0) + unrealized (2.0)
-        assert portfolio.total_pnl == pytest.approx(7.0, abs=0.1)
+    @pytest.mark.asyncio
+    async def test_close_nonexistent(self, portfolio):
+        pnl = await portfolio.close_position("ghost", 0.5, ExitReason.STOP_LOSS)
+        assert pnl == 0.0
 
-    def test_win_rate(self, portfolio):
-        for i in range(3):
-            pos = Position(
-                id=f"p{i}", market_id="m1", asset_id="a1",
-                side=TradeSide.BUY, size=100,
-                entry_price=0.50, current_price=0.60, peak_price=0.60,
-            )
-            portfolio.add_position(pos)
-            portfolio.close_position(f"p{i}", 0.60, ExitReason.TAKE_PROFIT)
+    @pytest.mark.asyncio
+    async def test_get_open_positions(self, portfolio, rm):
+        await portfolio.open_position(make_position(rm, market_id="a"))
+        await portfolio.open_position(make_position(rm, market_id="b"))
+        open_positions = await portfolio.get_open_positions()
+        assert len(open_positions) == 2
 
-        pos_loss = Position(
-            id="p_loss", market_id="m1", asset_id="a1",
-            side=TradeSide.BUY, size=100,
-            entry_price=0.50, current_price=0.40, peak_price=0.50,
-        )
-        portfolio.add_position(pos_loss)
-        portfolio.close_position("p_loss", 0.40, ExitReason.STOP_LOSS)
+    @pytest.mark.asyncio
+    async def test_update_peak_price(self, portfolio, rm):
+        pos = make_position(rm)
+        await portfolio.open_position(pos)
+        await portfolio.update_peak_price(pos.position_id, 0.70)
+        fetched = await portfolio.get_position(pos.position_id)
+        assert fetched.peak_price == 0.70
 
-        assert portfolio.win_rate == pytest.approx(0.75, abs=0.01)
+    @pytest.mark.asyncio
+    async def test_trader_pnl_aggregates_closed(self, portfolio, rm):
+        pos1 = make_position(rm, market_id="a", entry=0.50, size=1000.0, trader="0xwhale")
+        pos2 = make_position(rm, market_id="b", entry=0.50, size=1000.0, trader="0xwhale")
+        await portfolio.open_position(pos1)
+        await portfolio.open_position(pos2)
+        await portfolio.close_position(pos1.position_id, 0.60, ExitReason.TAKE_PROFIT)  # +100
+        await portfolio.close_position(pos2.position_id, 0.45, ExitReason.STOP_LOSS)    # -50
+        total = await portfolio.get_trader_pnl("0xwhale")
+        assert total == pytest.approx(50.0)
 
-    def test_win_rate_no_trades(self, portfolio):
-        assert portfolio.win_rate == 0.0
+    @pytest.mark.asyncio
+    async def test_persistence_across_instances(self, tmp_path, rm):
+        db = str(tmp_path / "persist.db")
+        pm1 = PortfolioManager(db_path=db)
+        await pm1.init()
+        pos = make_position(rm)
+        await pm1.open_position(pos)
+        await pm1.close()
 
-    def test_get_trader_positions(self, portfolio):
-        pos1 = Position(
-            id="p1", market_id="m1", asset_id="a1",
-            side=TradeSide.BUY, size=100, entry_price=0.5,
-            current_price=0.5, peak_price=0.5, source_trader="0xaaa",
-        )
-        pos2 = Position(
-            id="p2", market_id="m2", asset_id="a2",
-            side=TradeSide.BUY, size=100, entry_price=0.5,
-            current_price=0.5, peak_price=0.5, source_trader="0xbbb",
-        )
-        portfolio.add_position(pos1)
-        portfolio.add_position(pos2)
+        pm2 = PortfolioManager(db_path=db)
+        await pm2.init()
+        assert await pm2.position_count() == 1
+        await pm2.close()
 
-        trader_a = portfolio.get_trader_positions("0xaaa")
-        assert len(trader_a) == 1
-        assert trader_a[0].id == "p1"
-
-    def test_update_prices(self, portfolio):
-        pos = Position(
-            id="p1", market_id="m1", asset_id="a1",
-            side=TradeSide.BUY, size=100,
-            entry_price=0.50, current_price=0.50, peak_price=0.50,
-        )
-        portfolio.add_position(pos)
-        portfolio.update_prices({"a1": 0.60})
-        assert portfolio.positions["p1"].current_price == 0.60
-
-    def test_save_and_load(self, portfolio):
-        pos = Position(
-            id="p1", market_id="m1", asset_id="a1",
-            side=TradeSide.BUY, size=100,
-            entry_price=0.50, current_price=0.55, peak_price=0.55,
-        )
-        portfolio.add_position(pos)
-        portfolio.closed_pnl = 42.0
-        portfolio.save()
-
-        # Load into a new portfolio
-        portfolio2 = Portfolio(state_file=portfolio.state_file)
-        portfolio2.load()
-        assert len(portfolio2.positions) == 1
-        assert portfolio2.positions["p1"].entry_price == 0.50
-        assert portfolio2.closed_pnl == 42.0
-
-    def test_load_nonexistent_file(self, tmp_path):
-        portfolio = Portfolio(state_file=str(tmp_path / "nonexistent.json"))
-        portfolio.load()  # Should not raise
-        assert len(portfolio.positions) == 0
-
-    def test_summary(self, portfolio, sample_position):
-        portfolio.add_position(sample_position)
-        summary = portfolio.summary()
+    @pytest.mark.asyncio
+    async def test_summary(self, portfolio, rm):
+        pos = make_position(rm, size=1000.0)
+        await portfolio.open_position(pos)
+        await portfolio.close_position(pos.position_id, 0.60, ExitReason.TAKE_PROFIT)
+        summary = await portfolio.summary()
         assert "Portfolio Summary" in summary
-        assert "Open positions: 1" in summary
+        assert "Closed trades: 1" in summary

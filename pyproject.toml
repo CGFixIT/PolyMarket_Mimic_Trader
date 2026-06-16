@@ -1,0 +1,27 @@
+[project]
+name = "polymarket-copier"
+version = "0.2.0"
+description = "Polymarket copy-trading bot with conservative, range-relative risk management"
+requires-python = ">=3.9"
+
+[tool.ruff]
+line-length = 120
+target-version = "py39"
+extend-exclude = [".claude", "data"]
+
+[tool.ruff.lint]
+# Keep the rule set lenient but useful: catch real bugs (pyflakes),
+# undefined names, and unused imports without enforcing strict style.
+select = ["E", "F", "W"]
+ignore = [
+    "E501",  # line too long (handled by formatter, not enforced here)
+    "E741",  # ambiguous variable name (e.g. `l`)
+]
+
+[tool.ruff.lint.per-file-ignores]
+"__init__.py" = ["F401"]  # allow re-exports
+"tests/*" = ["F401", "F811"]  # fixtures and redefinitions are common in tests
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]

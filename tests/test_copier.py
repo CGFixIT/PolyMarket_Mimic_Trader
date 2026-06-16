@@ -1,153 +1,142 @@
-"""Tests for the copy trade engine."""
+"""Tests for the v2 copy-trade engine (paper-mode orchestration)."""
 
 from __future__ import annotations
 
 import time
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock
 
 import pytest
 
 from polymarket_copier.api.clob_client import ClobClient
 from polymarket_copier.config import AppConfig
 from polymarket_copier.core.copier import CopyTrader
-from polymarket_copier.core.portfolio import Portfolio
-from polymarket_copier.core.risk_manager import RiskManager
-from polymarket_copier.models.types import ExitReason, Position, Trade, TradeSide
+from polymarket_copier.core.monitor import TradeEvent, TradeType
+from polymarket_copier.core.portfolio import PortfolioManager
+from polymarket_copier.core.risk_manager import RiskConfig, RiskManager
+from polymarket_copier.models.types import Market
 
 
-class TestCopyTrader:
-    @pytest.fixture
-    def paper_config(self):
-        return AppConfig(mode="paper", bankroll=10000)
+@pytest.fixture
+def config() -> AppConfig:
+    return AppConfig(mode="paper", bankroll=10_000)
 
-    @pytest.fixture
-    def clob_client(self, paper_config):
-        return ClobClient(paper_config)
 
-    @pytest.fixture
-    def copy_trader(self, clob_client, mock_gamma_client, risk_config, copy_config):
-        rm = RiskManager(risk_config, copy_config, bankroll=10000)
-        portfolio = Portfolio(state_file="/tmp/test_portfolio.json")
-        return CopyTrader(clob_client, mock_gamma_client, rm, portfolio)
+@pytest.fixture
+async def portfolio(tmp_path):
+    pm = PortfolioManager(db_path=str(tmp_path / "copier_test.db"))
+    await pm.init()
+    yield pm
+    await pm.close()
+
+
+@pytest.fixture
+def gamma():
+    g = AsyncMock()
+    g.get_market = AsyncMock(return_value=Market(
+        condition_id="mkt-a", question="Q?", volume_24h=50_000, active=True,
+        resolve_time=None,
+    ))
+    g.get_market_price = AsyncMock(return_value=0.50)
+    return g
+
+
+@pytest.fixture
+def copier(config, portfolio, gamma):
+    risk = RiskManager(config=RiskConfig(), bankroll=config.bankroll)
+    clob = ClobClient(config)
+    return CopyTrader(risk, portfolio, clob, gamma, config)
+
+
+def buy_event(price=0.50, size=100.0, market="mkt-a", token="tok-a", wallet="0xwhale") -> TradeEvent:
+    return TradeEvent(
+        event_id="e1", wallet_address=wallet, market_id=market, token_id=token,
+        outcome_label="Yes", trade_type=TradeType.BUY, price=price,
+        size_usdc=size, timestamp=time.time(), transaction_hash="0xhash",
+    )
+
+
+class TestHandleTradeEvent:
+    @pytest.mark.asyncio
+    async def test_buy_opens_position(self, copier):
+        await copier.handle_trade_event(buy_event())
+        assert await copier.portfolio.position_count() == 1
 
     @pytest.mark.asyncio
-    async def test_handle_buy_trade(self, copy_trader, mock_gamma_client):
-        mock_gamma_client.get_market_price.return_value = 0.65
-        trade = Trade(
-            id="t1", trader_address="0xaaa111", market_id="m1", asset_id="a1",
-            side=TradeSide.BUY, size=100, price=0.65,
-        )
-        await copy_trader.handle_trade(trade)
-        assert len(copy_trader.portfolio.positions) == 1
-        pos = list(copy_trader.portfolio.positions.values())[0]
-        assert pos.size == 50  # 0.5x of 100
-        assert pos.entry_price == 0.65
+    async def test_copy_size_is_conservative(self, copier):
+        # size_multiplier 0.5 → 50 USDC, well under 2% bankroll cap ($200)
+        await copier.handle_trade_event(buy_event(price=0.50, size=100.0))
+        positions = await copier.portfolio.get_open_positions()
+        assert len(positions) == 1
+        # 50 USDC / 0.50 price = 100 shares
+        assert positions[0].size_shares == pytest.approx(100.0)
 
     @pytest.mark.asyncio
-    async def test_skip_sell_trade(self, copy_trader):
-        trade = Trade(
-            id="t1", trader_address="0xaaa111", market_id="m1", asset_id="a1",
-            side=TradeSide.SELL, size=100, price=0.65,
-        )
-        await copy_trader.handle_trade(trade)
-        assert len(copy_trader.portfolio.positions) == 0
+    async def test_copy_size_capped_at_bankroll_pct(self, copier):
+        # Large source trade → capped at 2% of $10k = $200 → 400 shares @ 0.50
+        await copier.handle_trade_event(buy_event(price=0.50, size=100_000.0))
+        positions = await copier.portfolio.get_open_positions()
+        assert positions[0].size_shares == pytest.approx(400.0)
 
     @pytest.mark.asyncio
-    async def test_skip_stale_trade(self, copy_trader, mock_gamma_client):
-        # Price moved 5% from trade price (exceeds 2% max deviation)
-        mock_gamma_client.get_market_price.return_value = 0.70
-        trade = Trade(
-            id="t1", trader_address="0xaaa111", market_id="m1", asset_id="a1",
-            side=TradeSide.BUY, size=100, price=0.65,
-        )
-        await copy_trader.handle_trade(trade)
-        assert len(copy_trader.portfolio.positions) == 0
+    async def test_sell_event_skipped(self, copier):
+        event = buy_event()
+        sell = TradeEvent(**{**event.__dict__, "trade_type": TradeType.SELL})
+        await copier.handle_trade_event(sell)
+        assert await copier.portfolio.position_count() == 0
 
     @pytest.mark.asyncio
-    async def test_copy_size_capped(self, copy_trader, mock_gamma_client):
-        mock_gamma_client.get_market_price.return_value = 0.65
-        trade = Trade(
-            id="t1", trader_address="0xaaa111", market_id="m1", asset_id="a1",
-            side=TradeSide.BUY, size=1000, price=0.65,
-        )
-        await copy_trader.handle_trade(trade)
-        pos = list(copy_trader.portfolio.positions.values())[0]
-        # 0.5x of 1000 = 500, but 2% of 10000 = 200
-        assert pos.size == 200
+    async def test_price_deviation_skip(self, copier, gamma):
+        # Current price 0.60 vs event 0.50 → 20% deviation > 2% max
+        gamma.get_market_price = AsyncMock(return_value=0.60)
+        await copier.handle_trade_event(buy_event(price=0.50))
+        assert await copier.portfolio.position_count() == 0
 
     @pytest.mark.asyncio
-    async def test_paper_mode_no_live_api_call(self, copy_trader, mock_gamma_client):
-        mock_gamma_client.get_market_price.return_value = 0.65
-        trade = Trade(
-            id="t1", trader_address="0xaaa111", market_id="m1", asset_id="a1",
-            side=TradeSide.BUY, size=100, price=0.65,
-        )
-        # This should not raise even though no real CLOB connection
-        await copy_trader.handle_trade(trade)
-        assert len(copy_trader.portfolio.positions) == 1
+    async def test_low_volume_skip(self, copier, gamma):
+        gamma.get_market = AsyncMock(return_value=Market(
+            condition_id="mkt-a", volume_24h=100, active=True, resolve_time=None,
+        ))
+        await copier.handle_trade_event(buy_event())
+        assert await copier.portfolio.position_count() == 0
 
     @pytest.mark.asyncio
-    async def test_blocked_by_risk_manager(self, copy_trader, mock_gamma_client):
-        mock_gamma_client.get_market_price.return_value = 0.65
-        # Hit daily loss limit
-        copy_trader.risk.daily_pnl = -301
-        trade = Trade(
-            id="t1", trader_address="0xaaa111", market_id="m1", asset_id="a1",
-            side=TradeSide.BUY, size=100, price=0.65,
-        )
-        await copy_trader.handle_trade(trade)
-        assert len(copy_trader.portfolio.positions) == 0
+    async def test_resolution_blackout_skip(self, copier, gamma):
+        from datetime import datetime, timezone, timedelta
+        soon = datetime.now(timezone.utc) + timedelta(hours=6)
+        gamma.get_market = AsyncMock(return_value=Market(
+            condition_id="mkt-a", volume_24h=50_000, active=True, resolve_time=soon,
+        ))
+        await copier.handle_trade_event(buy_event())
+        assert await copier.portfolio.position_count() == 0
 
     @pytest.mark.asyncio
-    async def test_check_exits_triggers_take_profit(self, copy_trader, mock_gamma_client):
-        # Add a position that's up 20%
-        pos = Position(
-            id="pos1", market_id="m1", asset_id="a1",
-            side=TradeSide.BUY, size=50,
-            entry_price=0.50, current_price=0.58, peak_price=0.58,
-            source_trader="0xaaa111",
-        )
-        copy_trader.portfolio.add_position(pos)
+    async def test_max_concurrent_positions(self, copier):
+        copier.config.copy_trading.max_concurrent_positions = 1
+        await copier.handle_trade_event(buy_event(market="mkt-a", token="tok-a"))
+        await copier.handle_trade_event(buy_event(market="mkt-b", token="tok-b"))
+        assert await copier.portfolio.position_count() == 1
 
-        # Price still above take profit
-        mock_gamma_client.get_market_price.return_value = 0.58
 
-        await copy_trader.check_exits()
-        # Position should be closed
-        assert len(copy_trader.portfolio.positions) == 0
+class TestHandlePriceTick:
+    @pytest.mark.asyncio
+    async def test_take_profit_exit(self, copier):
+        from polymarket_copier.core.monitor import PriceTick
+        await copier.handle_trade_event(buy_event(price=0.50, token="tok-a"))
+        assert await copier.portfolio.position_count() == 1
+        # Price jumps to TP (0.70 for entry 0.50) → position closes
+        await copier.handle_price_tick(PriceTick(token_id="tok-a", price=0.72))
+        assert await copier.portfolio.position_count() == 0
 
     @pytest.mark.asyncio
-    async def test_check_exits_no_trigger(self, copy_trader, mock_gamma_client):
-        pos = Position(
-            id="pos1", market_id="m1", asset_id="a1",
-            side=TradeSide.BUY, size=50,
-            entry_price=0.50, current_price=0.52, peak_price=0.52,
-            source_trader="0xaaa111",
-        )
-        copy_trader.portfolio.add_position(pos)
-
-        mock_gamma_client.get_market_price.return_value = 0.52
-
-        await copy_trader.check_exits()
-        # Position should still be open (4% gain, below 15% TP)
-        assert len(copy_trader.portfolio.positions) == 1
+    async def test_hold_no_exit(self, copier):
+        from polymarket_copier.core.monitor import PriceTick
+        await copier.handle_trade_event(buy_event(price=0.50, token="tok-a"))
+        await copier.handle_price_tick(PriceTick(token_id="tok-a", price=0.55))
+        assert await copier.portfolio.position_count() == 1
 
     @pytest.mark.asyncio
-    async def test_per_trader_allocation_cap(self, copy_trader, mock_gamma_client):
-        mock_gamma_client.get_market_price.return_value = 0.65
-
-        # Fill up trader allocation (5% of 10000 = 500)
-        pos = Position(
-            id="pos1", market_id="m1", asset_id="a1",
-            side=TradeSide.BUY, size=500, entry_price=1.0, current_price=1.0,
-            peak_price=1.0, source_trader="0xaaa111",
-        )
-        copy_trader.portfolio.add_position(pos)
-
-        trade = Trade(
-            id="t2", trader_address="0xaaa111", market_id="m2", asset_id="a2",
-            side=TradeSide.BUY, size=100, price=0.65,
-        )
-        await copy_trader.handle_trade(trade)
-        # Should be blocked by allocation cap
-        assert len(copy_trader.portfolio.positions) == 1  # Only the original
+    async def test_unknown_token_ignored(self, copier):
+        from polymarket_copier.core.monitor import PriceTick
+        # No position for this token → no error
+        await copier.handle_price_tick(PriceTick(token_id="ghost", price=0.55))
+        assert await copier.portfolio.position_count() == 0

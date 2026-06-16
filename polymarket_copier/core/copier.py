@@ -1,17 +1,22 @@
-"""Copy trade engine — receives trade events and executes conservative copies."""
+"""Copy trade engine v2 — range-relative risk management + resolution blackout."""
 
 from __future__ import annotations
 
 import logging
+import time
 import uuid
 
-from polymarket_copier.api.clob_client import ClobClient
+from polymarket_copier.api.clob_client import ClobClient, InsufficientLiquidityError
 from polymarket_copier.api.gamma_client import GammaClient
-from polymarket_copier.core.portfolio import Portfolio
-from polymarket_copier.core.risk_manager import RiskManager
-from polymarket_copier.models.types import CopyOrder, ExitReason, Position, Trade, TradeSide
+from polymarket_copier.config import AppConfig
+from polymarket_copier.core.monitor import PriceTick, TradeEvent, TradeType
+from polymarket_copier.core.portfolio import PortfolioManager
+from polymarket_copier.core.risk_manager import ExitReason, ExposureCapError, RiskManager
+from polymarket_copier.models.types import Order
 
 logger = logging.getLogger("polymarket_copier")
+
+_RESOLUTION_BLACKOUT_HOURS = 24.0
 
 
 class CopyTrader:
@@ -19,138 +24,192 @@ class CopyTrader:
 
     def __init__(
         self,
+        risk_manager: RiskManager,
+        portfolio: PortfolioManager,
         clob_client: ClobClient,
         gamma_client: GammaClient,
-        risk_manager: RiskManager,
-        portfolio: Portfolio,
+        config: AppConfig,
+        monitor=None,
     ):
-        self.clob = clob_client
-        self.gamma = gamma_client
         self.risk = risk_manager
         self.portfolio = portfolio
+        self.clob = clob_client
+        self.gamma = gamma_client
+        self.config = config
+        self.monitor = monitor
 
-    async def handle_trade(self, trade: Trade) -> None:
-        """Process a new trade from a tracked wallet."""
+    async def handle_trade_event(self, event: TradeEvent) -> None:
+        """Called by TradeMonitor on every new detected trade."""
         logger.info(
-            "Processing trade from %s: %s %.4f @ %.4f on %s",
-            trade.trader_address[:10],
-            trade.side.value,
-            trade.size,
-            trade.price,
-            trade.market_id[:10] if trade.market_id else "unknown",
+            "Trade event from %s: %s $%.2f @ %.4f on %s",
+            event.wallet_address[:10], event.trade_type.value,
+            event.size_usdc, event.price, event.market_id[:10],
         )
 
-        if trade.side == TradeSide.SELL:
-            logger.debug("Skipping SELL trade — we manage our own exits")
+        if self.config.mode == "paper":
+            logger.info("[PAPER] Processing trade event %s", event.event_id)
+
+        # 2. Only copy entries, not exits.
+        if event.trade_type != TradeType.BUY:
+            logger.debug("Skipping non-BUY trade")
             return
 
-        # Check if we can open a new position
-        allowed, reason = self.risk.can_open_position(trade, self.portfolio.open_positions)
-        if not allowed:
-            logger.info("Trade blocked by risk manager: %s", reason)
-            return
+        # 3. Resolution blackout.
+        market = await self.gamma.get_market(event.market_id)
+        if market and market.resolve_time:
+            hours_to_resolve = (market.resolve_time.timestamp() - time.time()) / 3600
+            if 0 < hours_to_resolve < _RESOLUTION_BLACKOUT_HOURS:
+                logger.info("Skip: market resolves in %.1fh (blackout)", hours_to_resolve)
+                return
 
-        # Check price deviation
-        current_price = await self.gamma.get_market_price(trade.asset_id or trade.market_id)
+        # 4. Price deviation check.
+        current_price = await self.gamma.get_market_price(event.token_id)
         if current_price is None:
-            current_price = trade.price
+            current_price = event.price
 
-        if not self.risk.check_price_deviation(trade.price, current_price):
-            deviation = abs(current_price - trade.price) / trade.price if trade.price else 0
+        if event.price > 0:
+            deviation = abs(current_price - event.price) / event.price
+            if deviation > self.config.copy_trading.max_price_deviation:
+                logger.info(
+                    "Skip: price deviation %.1f%% > max %.1f%%",
+                    deviation * 100, self.config.copy_trading.max_price_deviation * 100,
+                )
+                return
+
+        # 5. Market volume check.
+        if market and market.volume_24h < self.config.copy_trading.min_market_volume:
             logger.info(
-                "Trade skipped — price deviation too high: %.1f%% (max %.1f%%)",
-                deviation * 100,
-                self.risk.copy.max_price_deviation * 100,
+                "Skip: 24h volume $%.0f < min $%.0f",
+                market.volume_24h, self.config.copy_trading.min_market_volume,
             )
             return
 
-        # Calculate conservative copy size
-        copy_size = self.risk.calculate_copy_size(trade.size)
-        if copy_size <= 0:
-            logger.info("Trade skipped — calculated size is 0")
+        # 6. Compute conservative copy size.
+        copy_size_usdc = min(
+            event.size_usdc * self.config.copy_trading.size_multiplier,
+            self.risk.bankroll * self.config.copy_trading.max_trade_pct,
+        )
+
+        if copy_size_usdc <= 0 or current_price <= 0:
             return
 
-        order = CopyOrder(
-            market_id=trade.market_id,
-            asset_id=trade.asset_id,
-            side=trade.side,
-            size=copy_size,
+        size_shares = copy_size_usdc / current_price
+
+        resolve_ts = None
+        if market and market.resolve_time:
+            resolve_ts = market.resolve_time.timestamp()
+
+        # 7. build_position enforces the exposure cap.
+        try:
+            pos = self.risk.build_position(
+                position_id=str(uuid.uuid4()),
+                market_id=event.market_id,
+                token_id=event.token_id,
+                trader_address=event.wallet_address,
+                entry_price=current_price,
+                size_shares=size_shares,
+                resolve_time=resolve_ts,
+            )
+        except ExposureCapError as e:
+            logger.info("Skip: exposure cap — %s", e)
+            return
+
+        # 8. Max concurrent positions.
+        count = await self.portfolio.position_count()
+        if count >= self.config.copy_trading.max_concurrent_positions:
+            logger.info("Skip: max positions (%d) reached", count)
+            return
+
+        # 9. Per-trader drawdown stop.
+        trader_pnl = await self.portfolio.get_trader_pnl(event.wallet_address)
+        if trader_pnl <= -(self.risk.bankroll * self.config.risk_management.drawdown_stop_pct):
+            logger.info(
+                "Skip: trader %s drawdown stop (pnl=$%.2f)",
+                event.wallet_address[:10], trader_pnl,
+            )
+            return
+
+        order = Order(
+            market_id=event.market_id,
+            token_id=event.token_id,
+            side="BUY",
             price=current_price,
-            source_trade=trade,
-            source_trader=trade.trader_address,
+            size_usdc=copy_size_usdc,
         )
 
-        result = await self.clob.place_order(order)
+        # 10–12. Place order (skip on insufficient liquidity, never propagate).
+        try:
+            await self.clob.place_order(order)
+        except InsufficientLiquidityError as e:
+            logger.info("Skip: insufficient liquidity — %s", e)
+            return
+        except Exception as e:
+            logger.error("Order placement failed: %s", e)
+            return
 
-        position = Position(
-            id=str(uuid.uuid4()),
-            market_id=trade.market_id,
-            asset_id=trade.asset_id,
-            side=trade.side,
-            size=copy_size,
-            entry_price=current_price,
-            current_price=current_price,
-            peak_price=current_price,
-            source_trader=trade.trader_address,
-            market_slug=trade.market_slug,
-            outcome=trade.outcome,
-        )
-        self.portfolio.add_position(position)
+        await self.portfolio.open_position(pos)
+
+        if self.monitor:
+            self.monitor.subscribe_token(event.token_id)
 
         logger.info(
-            "Copy trade executed: %s %.4f @ %.4f (original: %.4f @ %.4f) status=%s",
-            order.side.value,
-            order.size,
-            order.price,
-            trade.size,
-            trade.price,
-            result.get("status", "unknown"),
+            "Copied: %s $%.2f @ %.4f | TP=%.4f SL=%.4f | from %s",
+            event.trade_type.value, copy_size_usdc, current_price,
+            pos.tp_price, pos.sl_price, event.wallet_address[:10],
         )
 
-    async def check_exits(self) -> None:
-        """Check all open positions against risk thresholds and exit if needed."""
-        positions_to_close: list[tuple[str, ExitReason]] = []
-
-        for position in self.portfolio.open_positions:
-            # Update price
-            price = await self.gamma.get_market_price(position.asset_id or position.market_id)
-            if price is not None:
-                position.update_price(price)
-
-            exit_reason = self.risk.check_position_exit(position)
-            if exit_reason:
-                positions_to_close.append((position.id, exit_reason))
-
-        for position_id, reason in positions_to_close:
-            await self._close_position(position_id, reason)
-
-    async def _close_position(self, position_id: str, reason: ExitReason) -> None:
-        """Close a position by placing an exit order."""
-        position = self.portfolio.positions.get(position_id)
-        if position is None:
+    async def handle_price_tick(self, tick: PriceTick) -> None:
+        """Called by the monitor's on_price callback for each real-time price update."""
+        pos = await self.portfolio.get_position_by_token(tick.token_id)
+        if pos is None:
             return
 
-        exit_side = TradeSide.SELL if position.side == TradeSide.BUY else TradeSide.BUY
-        exit_order = CopyOrder(
-            market_id=position.market_id,
-            asset_id=position.asset_id,
-            side=exit_side,
-            size=position.size,
-            price=position.current_price,
-            source_trade=Trade(
-                id=f"exit-{position_id}",
-                trader_address=position.source_trader,
-                market_id=position.market_id,
-                asset_id=position.asset_id,
-                side=exit_side,
-                size=position.size,
-                price=position.current_price,
-            ),
-            source_trader=position.source_trader,
+        reason = self.risk.evaluate(pos, tick.price)
+
+        if tick.price > pos.peak_price:
+            await self.portfolio.update_peak_price(pos.position_id, tick.price)
+
+        if reason != ExitReason.HOLD:
+            await self._exit_position(pos, tick.price, reason)
+
+    async def _exit_position(self, pos, price: float, reason: ExitReason) -> None:
+        exit_order = Order(
+            market_id=pos.market_id,
+            token_id=pos.token_id,
+            side="SELL",
+            price=price,
+            size_usdc=max(price * pos.size_shares, _EPSILON_USDC),
         )
 
-        await self.clob.place_order(exit_order)
+        try:
+            await self.clob.place_order(exit_order)
+        except Exception as e:
+            logger.error("Exit order failed for %s: %s", pos.position_id, e)
+            return
 
-        pnl = self.portfolio.close_position(position_id, position.current_price, reason)
-        if pnl is not None:
-            self.risk.record_trade_result(pnl, position.source_trader)
+        pnl = await self.portfolio.close_position(pos.position_id, price, reason)
+        self.risk.record_exit(pos, price)
+
+        if self.monitor:
+            self.monitor.unsubscribe_token(pos.token_id)
+
+        logger.info(
+            "Exited [%s]: %s pnl=$%.4f @ %.4f",
+            reason.name, pos.position_id, pnl, price,
+        )
+
+    async def check_all_exits(self) -> None:
+        """Poll-based exit check fallback (when WS price feed is unavailable)."""
+        positions = await self.portfolio.get_open_positions()
+        for pos in positions:
+            price = await self.gamma.get_market_price(pos.token_id)
+            if price is None:
+                continue
+            reason = self.risk.evaluate(pos, price)
+            if reason != ExitReason.HOLD:
+                await self._exit_position(pos, price, reason)
+
+
+# Smallest non-zero order size to keep the Order model's gt=0 validation happy
+# when a position would otherwise round to zero notional.
+_EPSILON_USDC = 1e-6

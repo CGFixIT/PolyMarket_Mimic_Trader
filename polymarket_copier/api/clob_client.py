@@ -6,12 +6,16 @@ import logging
 from typing import Any, Optional
 
 from polymarket_copier.config import AppConfig
-from polymarket_copier.models.types import CopyOrder, TradeSide
+from polymarket_copier.models.types import Order
 
 logger = logging.getLogger("polymarket_copier")
 
 CLOB_BASE = "https://clob.polymarket.com"
 CHAIN_ID = 137  # Polygon mainnet
+
+
+class InsufficientLiquidityError(RuntimeError):
+    """Raised when the order book lacks depth to fill an order within 1% of price."""
 
 
 class ClobClient:
@@ -39,11 +43,9 @@ class ClobClient:
                 key=self.config.private_key,
                 chain_id=CHAIN_ID,
             )
-            if self.config.api_key:
+            if self.config.api_key and self.config.api_secret:
                 self._client.set_api_creds(
-                    self._client.create_or_derive_api_creds()
-                    if not self.config.api_secret
-                    else type("Creds", (), {
+                    type("Creds", (), {
                         "api_key": self.config.api_key,
                         "api_secret": self.config.api_secret,
                         "api_passphrase": self.config.api_passphrase,
@@ -54,59 +56,91 @@ class ClobClient:
                 self._client.set_api_creds(creds)
             logger.info("Live CLOB client initialized")
         except ImportError:
-            raise ImportError("py-clob-client is required for live trading: pip install py-clob-client")
+            raise ImportError(
+                "py-clob-client required for live trading: pip install py-clob-client"
+            )
 
-    async def place_order(self, order: CopyOrder) -> dict[str, Any]:
+    async def get_order_book(self, token_id: str) -> dict[str, Any]:
+        if self.paper_mode:
+            return {
+                "bids": [{"price": "0.50", "size": "10000"}],
+                "asks": [{"price": "0.51", "size": "10000"}],
+            }
+        self._init_live_client()
+        return self._client.get_order_book(token_id)
+
+    def _check_liquidity(self, book: dict, price: float, size_usdc: float) -> None:
+        """Ensure there is enough resting depth to fill without walking >1%."""
+        bids = book.get("bids", [])
+        available = 0.0
+        max_price = price * 1.01
+        for level in bids:
+            level_price = float(level.get("price", 0))
+            level_size = float(level.get("size", 0))
+            if level_price <= max_price:
+                available += level_price * level_size
+        if available < size_usdc:
+            raise InsufficientLiquidityError(
+                f"Insufficient liquidity: need ${size_usdc:.2f}, "
+                f"available ${available:.2f} within 1% of ${price:.4f}"
+            )
+
+    async def place_order(self, order: Order) -> dict[str, Any]:
         """Place an order on the CLOB. Returns order details or paper-mode simulation."""
+        book = await self.get_order_book(order.token_id)
+        if order.side == "BUY":
+            self._check_liquidity(book, order.price, order.size_usdc)
+
         if self.paper_mode:
             result = {
                 "status": "PAPER",
                 "market_id": order.market_id,
-                "asset_id": order.asset_id,
-                "side": order.side.value,
-                "size": order.size,
+                "token_id": order.token_id,
+                "side": order.side,
+                "size_usdc": order.size_usdc,
                 "price": order.price,
             }
-            logger.info("[PAPER] Order placed: %s %.4f @ %.4f on %s", order.side.value, order.size, order.price, order.market_id)
+            logger.info(
+                "[PAPER] Order: %s $%.2f @ %.4f on %s",
+                order.side, order.size_usdc, order.price, order.market_id,
+            )
             return result
 
         self._init_live_client()
         from py_clob_client.order_builder.constants import BUY as CLOB_BUY, SELL as CLOB_SELL
 
-        side = CLOB_BUY if order.side == TradeSide.BUY else CLOB_SELL
+        side = CLOB_BUY if order.side == "BUY" else CLOB_SELL
+        size_shares = order.size_usdc / order.price if order.price > 0 else 0
         signed_order = self._client.create_and_post_order(
-            token_id=order.asset_id,
+            token_id=order.token_id,
             price=order.price,
-            size=order.size,
+            size=size_shares,
             side=side,
         )
-        logger.info("[LIVE] Order placed: %s %.4f @ %.4f on %s -> %s", order.side.value, order.size, order.price, order.market_id, signed_order)
+        logger.info(
+            "[LIVE] Order: %s $%.2f @ %.4f -> %s",
+            order.side, order.size_usdc, order.price, signed_order,
+        )
         return {"status": "LIVE", "result": signed_order}
 
     async def cancel_order(self, order_id: str) -> bool:
-        """Cancel an existing order."""
         if self.paper_mode:
-            logger.info("[PAPER] Order cancelled: %s", order_id)
+            logger.info("[PAPER] Cancel: %s", order_id)
             return True
-
         self._init_live_client()
         try:
             self._client.cancel(order_id)
-            logger.info("[LIVE] Order cancelled: %s", order_id)
             return True
         except Exception as e:
-            logger.error("Failed to cancel order %s: %s", order_id, e)
+            logger.error("Failed to cancel %s: %s", order_id, e)
             return False
 
     async def get_balance(self) -> Optional[float]:
-        """Get available USDC balance."""
         if self.paper_mode:
             return self.config.bankroll
-
         self._init_live_client()
         try:
-            balance = self._client.get_balance()
-            return float(balance) if balance else None
+            return float(self._client.get_balance())
         except Exception as e:
             logger.error("Failed to get balance: %s", e)
             return None
