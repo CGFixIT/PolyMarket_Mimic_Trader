@@ -1,4 +1,6 @@
 # PolyMarket_Mimic_Trader
+[![CodeQL – PolyMarket Mimic Trader](https://github.com/CGFixIT/PolyMarket_Mimic_Trader/actions/workflows/codeql.yml/badge.svg)](https://github.com/CGFixIT/PolyMarket_Mimic_Trader/actions/workflows/codeql.yml)
+[![CI](https://github.com/CGFixIT/PolyMarket_Mimic_Trader/actions/workflows/ci.yml/badge.svg)](https://github.com/CGFixIT/PolyMarket_Mimic_Trader/actions/workflows/ci.yml)
 
 A Python copy-trading bot that monitors the most successful traders on [Polymarket](https://polymarket.com), identifies their new trades in real time, and copies them with conservative, range-relative risk management designed specifically for prediction markets.
 
