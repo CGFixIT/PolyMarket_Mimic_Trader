@@ -54,8 +54,23 @@ class PortfolioManager:
         if self._db:
             await self._db.close()
 
+    def _require_db(self) -> aiosqlite.Connection:
+        """Return the live connection or fail loudly if init() was never awaited.
+
+        Without this guard, every query below would raise a cryptic
+        ``AttributeError: 'NoneType' object has no attribute 'execute'`` that
+        gives no hint about the real cause (a missing ``await portfolio.init()``).
+        """
+        if self._db is None:
+            raise RuntimeError(
+                "PortfolioManager is not initialized. "
+                "Call `await portfolio.init()` before using it."
+            )
+        return self._db
+
     async def open_position(self, pos: Position) -> None:
-        await self._db.execute(
+        db = self._require_db()
+        await db.execute(
             """INSERT INTO positions
                (position_id, market_id, token_id, trader_address, entry_price,
                 tp_price, sl_price, peak_price, size_shares, entry_time, resolve_time, status)
@@ -64,33 +79,36 @@ class PortfolioManager:
              pos.entry_price, pos.tp_price, pos.sl_price, pos.peak_price,
              pos.size_shares, pos.entry_time, pos.resolve_time),
         )
-        await self._db.commit()
+        await db.commit()
         logger.info("Position opened in DB: %s", pos.position_id)
 
     async def close_position(
         self, position_id: str, exit_price: float, reason: ExitReason,
     ) -> float:
+        db = self._require_db()
         pos = await self.get_position(position_id)
         if pos is None:
             logger.warning("Position %s not found for closing", position_id)
             return 0.0
         pnl = pos.pnl_at(exit_price)
-        await self._db.execute(
+        await db.execute(
             """UPDATE positions SET status='closed', exit_price=?, exit_reason=?,
                realized_pnl=?, closed_at=? WHERE position_id=?""",
             (exit_price, reason.name, pnl, time.time(), position_id),
         )
-        await self._db.commit()
+        await db.commit()
         logger.info("Position closed: %s reason=%s pnl=%.4f", position_id, reason.name, pnl)
         return pnl
 
     async def get_open_positions(self) -> List[Position]:
-        cursor = await self._db.execute("SELECT * FROM positions WHERE status='open'")
+        db = self._require_db()
+        cursor = await db.execute("SELECT * FROM positions WHERE status='open'")
         rows = await cursor.fetchall()
         return [_row_to_position(row) for row in rows]
 
     async def get_position(self, position_id: str) -> Optional[Position]:
-        cursor = await self._db.execute(
+        db = self._require_db()
+        cursor = await db.execute(
             "SELECT * FROM positions WHERE position_id=?", (position_id,)
         )
         row = await cursor.fetchone()
@@ -99,7 +117,8 @@ class PortfolioManager:
         return _row_to_position(row)
 
     async def get_position_by_token(self, token_id: str) -> Optional[Position]:
-        cursor = await self._db.execute(
+        db = self._require_db()
+        cursor = await db.execute(
             "SELECT * FROM positions WHERE token_id=? AND status='open'", (token_id,)
         )
         row = await cursor.fetchone()
@@ -108,21 +127,24 @@ class PortfolioManager:
         return _row_to_position(row)
 
     async def position_count(self) -> int:
-        cursor = await self._db.execute(
+        db = self._require_db()
+        cursor = await db.execute(
             "SELECT COUNT(*) FROM positions WHERE status='open'"
         )
         row = await cursor.fetchone()
         return row[0] if row else 0
 
     async def update_peak_price(self, position_id: str, peak_price: float) -> None:
-        await self._db.execute(
+        db = self._require_db()
+        await db.execute(
             "UPDATE positions SET peak_price=? WHERE position_id=?",
             (peak_price, position_id),
         )
-        await self._db.commit()
+        await db.commit()
 
     async def get_trader_pnl(self, trader_address: str) -> float:
-        cursor = await self._db.execute(
+        db = self._require_db()
+        cursor = await db.execute(
             "SELECT COALESCE(SUM(realized_pnl), 0) FROM positions "
             "WHERE trader_address=? AND status='closed'",
             (trader_address,),
@@ -131,8 +153,9 @@ class PortfolioManager:
         return float(row[0]) if row else 0.0
 
     async def summary(self) -> str:
+        db = self._require_db()
         open_count = await self.position_count()
-        cursor = await self._db.execute(
+        cursor = await db.execute(
             "SELECT COUNT(*), COALESCE(SUM(realized_pnl), 0), "
             "SUM(CASE WHEN realized_pnl > 0 THEN 1 ELSE 0 END) "
             "FROM positions WHERE status='closed'"

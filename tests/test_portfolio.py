@@ -117,3 +117,26 @@ class TestPortfolioManager:
         summary = await portfolio.summary()
         assert "Portfolio Summary" in summary
         assert "Closed trades: 1" in summary
+
+
+class TestUninitializedGuard:
+    """Using a PortfolioManager before `init()` must raise a clear, actionable
+    RuntimeError instead of a cryptic AttributeError on a None connection."""
+
+    @pytest.mark.asyncio
+    async def test_position_count_before_init_raises(self, rm):
+        pm = PortfolioManager(db_path="unused.db")
+        with pytest.raises(RuntimeError, match="not initialized"):
+            await pm.position_count()
+
+    @pytest.mark.asyncio
+    async def test_open_position_before_init_raises(self, rm):
+        pm = PortfolioManager(db_path="unused.db")
+        with pytest.raises(RuntimeError, match="not initialized"):
+            await pm.open_position(make_position(rm))
+
+    @pytest.mark.asyncio
+    async def test_close_before_init_does_not_leak_attribute_error(self, rm):
+        pm = PortfolioManager(db_path="unused.db")
+        with pytest.raises(RuntimeError, match="not initialized"):
+            await pm.get_open_positions()

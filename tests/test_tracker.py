@@ -4,12 +4,15 @@ from __future__ import annotations
 
 import time
 
+import pytest
+
 from polymarket_copier.core.tracker import (
     ScoredTrader,
     TraderScorer,
     TraderStats,
     TrackerConfig,
     _compute_trader_stats,
+    _parse_timestamp,
 )
 
 
@@ -112,3 +115,50 @@ class TestComputeTraderStats:
         stats = _compute_trader_stats("0xabc", "Name", 50000, [])
         assert stats.win_rate == 0.0
         assert stats.pnl_per_trade == []
+
+    def test_malformed_price_is_skipped_not_fatal(self):
+        # A record with a non-numeric price must be skipped silently; the valid
+        # round-trip should still be counted. Robustness against dirty API data.
+        activity = [
+            {"id": "bad", "type": "trade", "side": "BUY", "market": "m",
+             "asset": "a", "price": "not-a-number", "size": "10",
+             "timestamp": 1_700_000_000},
+            {"id": "b1", "type": "trade", "side": "BUY", "market": "m",
+             "asset": "a", "price": "0.50", "size": "100",
+             "timestamp": 1_700_000_000},
+            {"id": "s1", "type": "trade", "side": "SELL", "market": "m",
+             "asset": "a", "price": "0.60", "size": "60",
+             "timestamp": 1_700_001_000},
+        ]
+        stats = _compute_trader_stats("0xabc", "Name", 50000, activity)
+        assert stats.trade_count == 1
+        assert stats.win_rate == 1.0
+
+    def test_non_trade_types_ignored(self):
+        activity = [
+            {"id": "x", "type": "transfer", "side": "BUY", "market": "m",
+             "asset": "a", "price": "0.5", "size": "10"},
+        ]
+        stats = _compute_trader_stats("0xabc", "Name", 50000, activity)
+        assert stats.pnl_per_trade == []
+
+
+class TestParseTimestamp:
+    def test_iso_string(self):
+        assert _parse_timestamp("2023-11-14T22:13:20+00:00") == pytest.approx(
+            1_700_000_000, abs=1
+        )
+
+    def test_invalid_string_returns_zero(self):
+        assert _parse_timestamp("garbage") == 0.0
+
+    def test_millis_normalized_to_seconds(self):
+        assert _parse_timestamp(1_700_000_000_000) == pytest.approx(
+            1_700_000_000, abs=1
+        )
+
+    def test_seconds_passthrough(self):
+        assert _parse_timestamp(1_700_000_000) == pytest.approx(1_700_000_000)
+
+    def test_unsupported_type_returns_zero(self):
+        assert _parse_timestamp(None) == 0.0

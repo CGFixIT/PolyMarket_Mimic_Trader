@@ -94,7 +94,14 @@ def load_config(
 
     bankroll_str = os.getenv("BANKROLL", "")
     if bankroll_str:
-        config.bankroll = float(bankroll_str)
+        try:
+            config.bankroll = float(bankroll_str)
+        except ValueError:
+            print(
+                f"ERROR: BANKROLL must be a number, got: {bankroll_str!r}",
+                file=sys.stderr,
+            )
+            sys.exit(1)
 
     if config.bankroll <= 0:
         print("ERROR: BANKROLL must be positive", file=sys.stderr)

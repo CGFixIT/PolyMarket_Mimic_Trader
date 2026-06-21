@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import pytest
 import yaml
 
 from polymarket_copier.config import AppConfig, load_config
@@ -67,6 +68,22 @@ class TestAppConfig:
         config = load_config(config_path=str(tmp_path / "nonexistent.yaml"))
         assert config.mode == "paper"
         assert config.bankroll == 500
+
+    def test_load_config_invalid_bankroll_exits(self, tmp_path, monkeypatch):
+        # A non-numeric BANKROLL env value must fail fast with a clear exit,
+        # not crash with an unhandled ValueError deep in load_config.
+        config_file = tmp_path / "config.yaml"
+        config_file.write_text(yaml.dump({"mode": "paper"}))
+        monkeypatch.setenv("BANKROLL", "not-a-number")
+        with pytest.raises(SystemExit):
+            load_config(config_path=str(config_file))
+
+    def test_load_config_negative_bankroll_exits(self, tmp_path, monkeypatch):
+        config_file = tmp_path / "config.yaml"
+        config_file.write_text(yaml.dump({"mode": "paper"}))
+        monkeypatch.setenv("BANKROLL", "-100")
+        with pytest.raises(SystemExit):
+            load_config(config_path=str(config_file))
 
     def test_trader_selection_v2_fields(self):
         config = AppConfig()

@@ -117,6 +117,41 @@ class TestHandleTradeEvent:
         assert await copier.portfolio.position_count() == 1
 
 
+class TestOrderFailureExposureRelease:
+    """When a copy order fails after exposure is reserved, that reservation must
+    be released — otherwise a never-opened position permanently consumes the
+    per-market exposure cap and silently blocks future copies in that market."""
+
+    @pytest.mark.asyncio
+    async def test_generic_order_failure_releases_exposure(self, copier):
+        copier.clob.place_order = AsyncMock(side_effect=RuntimeError("exchange down"))
+        await copier.handle_trade_event(buy_event(market="mkt-x", token="tok-x"))
+        assert await copier.portfolio.position_count() == 0
+        assert copier.risk.market_exposure("mkt-x") == pytest.approx(0.0)
+
+    @pytest.mark.asyncio
+    async def test_insufficient_liquidity_releases_exposure(self, copier):
+        from polymarket_copier.api.clob_client import InsufficientLiquidityError
+        copier.clob.place_order = AsyncMock(
+            side_effect=InsufficientLiquidityError("thin book")
+        )
+        await copier.handle_trade_event(buy_event(market="mkt-y", token="tok-y"))
+        assert await copier.portfolio.position_count() == 0
+        assert copier.risk.market_exposure("mkt-y") == pytest.approx(0.0)
+
+    @pytest.mark.asyncio
+    async def test_market_reusable_after_failed_order(self, copier):
+        # A failed order must not poison the market: a subsequent good order in
+        # the same market should still open (exposure was fully released).
+        copier.clob.place_order = AsyncMock(side_effect=RuntimeError("boom"))
+        await copier.handle_trade_event(buy_event(market="mkt-z", token="tok-z"))
+        assert await copier.portfolio.position_count() == 0
+
+        copier.clob.place_order = AsyncMock(return_value={"status": "PAPER"})
+        await copier.handle_trade_event(buy_event(market="mkt-z", token="tok-z"))
+        assert await copier.portfolio.position_count() == 1
+
+
 class TestHandlePriceTick:
     @pytest.mark.asyncio
     async def test_take_profit_exit(self, copier):
