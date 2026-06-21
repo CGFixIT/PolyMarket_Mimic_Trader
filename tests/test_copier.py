@@ -246,6 +246,78 @@ class TestPerTraderAllocationOnCopy:
         assert copier.risk.trader_exposure("0xwhale") == pytest.approx(0.0)
 
 
+# ─── Kelly position sizing (opt-in) ───────────────────────────────────────────
+
+async def _seed_closed_trades(portfolio, trader: str, wins: int, losses: int) -> None:
+    """Insert N closed winning/losing positions for a trader directly into the DB."""
+    db = portfolio._require_db()
+    n = 0
+    for is_win, count in ((True, wins), (False, losses)):
+        for _ in range(count):
+            n += 1
+            await db.execute(
+                """INSERT INTO positions
+                   (position_id, market_id, token_id, trader_address, entry_price,
+                    tp_price, sl_price, peak_price, size_shares, entry_time,
+                    resolve_time, status, exit_price, exit_reason, realized_pnl, closed_at)
+                   VALUES (?, 'm', 't', ?, 0.5, 0.7, 0.4, 0.5, 100, 0, NULL,
+                           'closed', 0.6, 'TAKE_PROFIT', ?, 0)""",
+                (f"seed-{trader}-{n}", trader, 10.0 if is_win else -10.0),
+            )
+    await db.commit()
+
+
+class TestKellySizing:
+    @pytest.mark.asyncio
+    async def test_flat_fallback_when_kelly_disabled(self, copier):
+        """kelly_enabled=False → flat size_multiplier formula, even with samples."""
+        copier.config.copy_trading.kelly_enabled = False
+        await _seed_closed_trades(copier.portfolio, "0xwhale", wins=80, losses=20)
+        await copier.handle_trade_event(buy_event(price=0.50, size=100.0, token="tok-a"))
+        open_pos = await copier.portfolio.get_open_positions()
+        assert len(open_pos) == 1
+        # Flat: 0.5*100 = $50 → 100 shares @ 0.50.
+        assert open_pos[0].size_shares == pytest.approx(100.0)
+
+    @pytest.mark.asyncio
+    async def test_flat_fallback_when_sample_too_small(self, copier):
+        """kelly_enabled=True but sample < kelly_min_trades → flat formula."""
+        copier.config.copy_trading.kelly_enabled = True
+        copier.config.copy_trading.kelly_min_trades = 20
+        await _seed_closed_trades(copier.portfolio, "0xwhale", wins=5, losses=0)  # 5 < 20
+        await copier.handle_trade_event(buy_event(price=0.50, size=100.0, token="tok-a"))
+        open_pos = await copier.portfolio.get_open_positions()
+        assert len(open_pos) == 1
+        assert open_pos[0].size_shares == pytest.approx(100.0)
+
+    @pytest.mark.asyncio
+    async def test_kelly_path_when_enabled_with_sample(self, copier):
+        """kelly_enabled=True and enough sample → Kelly sizing (differs from flat)."""
+        copier.config.copy_trading.kelly_enabled = True
+        copier.config.copy_trading.kelly_min_trades = 20
+        copier.config.copy_trading.kelly_fraction_multiplier = 0.25
+        copier.config.copy_trading.max_trade_pct = 0.02
+        # 70 wins / 100 → win_rate 0.70 at price 0.50.
+        await _seed_closed_trades(copier.portfolio, "0xwhale", wins=70, losses=30)
+        await copier.handle_trade_event(buy_event(price=0.50, size=100.0, token="tok-a"))
+        open_pos = await copier.portfolio.get_open_positions()
+        assert len(open_pos) == 1
+        # f* = 0.7 - 0.3 = 0.4; raw = 10000*0.4*0.25 = 1000; cap = 2% of 10k = 200.
+        # Clamped to $200 → 400 shares @ 0.50. (Flat would be 100 shares.)
+        assert open_pos[0].size_shares == pytest.approx(400.0)
+
+    @pytest.mark.asyncio
+    async def test_kelly_no_edge_skips_when_enabled(self, copier):
+        """Kelly with no edge (win_rate == price) sizes to 0 → no position opened."""
+        copier.config.copy_trading.kelly_enabled = True
+        copier.config.copy_trading.kelly_min_trades = 20
+        # 50 wins / 100 → win_rate 0.50 == price 0.50 → f*=0 → size 0 → no copy.
+        await _seed_closed_trades(copier.portfolio, "0xwhale", wins=50, losses=50)
+        await copier.handle_trade_event(buy_event(price=0.50, size=100.0, token="tok-a"))
+        open_pos = await copier.portfolio.get_open_positions()
+        assert len(open_pos) == 0
+
+
 # ─── Source exit mirroring ────────────────────────────────────────────────────
 
 def sell_event(token="tok-a", wallet="0xwhale") -> TradeEvent:

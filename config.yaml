@@ -20,6 +20,9 @@ copy_trading:
   mirror_source_exits: true
   paper_fill_slippage_pct: 0.005
   paper_taker_fee_pct: 0.02
+  kelly_enabled: false
+  kelly_fraction_multiplier: 0.25
+  kelly_min_trades: 20
 
 risk_management:
   tp_range_fraction: 0.40
