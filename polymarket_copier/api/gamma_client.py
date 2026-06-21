@@ -76,9 +76,17 @@ class GammaClient:
                 resp.raise_for_status()
                 data = await resp.json()
             if isinstance(data, dict):
-                price = data.get("mid") or data.get("midpoint") or data.get("price")
-                if price is not None:
-                    return float(price)
+                raw = data.get("mid") or data.get("midpoint") or data.get("price")
+                if raw is not None:
+                    price = float(raw)
+                    if not (0.0 <= price <= 1.0):
+                        logger.warning(
+                            "Rejecting out-of-range price %.6f for token %s "
+                            "(Polymarket tokens are bounded in [0, 1])",
+                            price, token_id[:10],
+                        )
+                        return None
+                    return price
         except Exception:
             logger.warning("Failed to get price for token %s", token_id)
         return None

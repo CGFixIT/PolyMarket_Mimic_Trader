@@ -37,6 +37,7 @@ from __future__ import annotations
 import logging
 import time
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from enum import Enum, auto
 from typing import Dict, Optional, Tuple
 
@@ -501,10 +502,12 @@ def _assert_valid_price(price: float, name: str = "price") -> None:
 
 
 def _midnight_utc() -> float:
-    """Unix timestamp of midnight UTC of the current day."""
-    t = time.gmtime()
-    return float(
-        time.mktime(
-            time.struct_time((t.tm_year, t.tm_mon, t.tm_mday, 0, 0, 0, 0, 0, 0))
-        )
-    )
+    """Unix timestamp of midnight UTC of the current day.
+
+    time.mktime() interprets struct_time in LOCAL time, which produces the
+    wrong reset point on non-UTC servers. Using timezone-aware datetime
+    guarantees the daily-loss window always resets at 00:00:00 UTC regardless
+    of the host's system timezone.
+    """
+    now = datetime.now(timezone.utc)
+    return now.replace(hour=0, minute=0, second=0, microsecond=0).timestamp()
