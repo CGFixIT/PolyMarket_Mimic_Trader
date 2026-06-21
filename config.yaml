@@ -17,6 +17,9 @@ copy_trading:
   max_concurrent_positions: 10
   min_market_volume: 5000
   max_trade_age_seconds: 12
+  mirror_source_exits: true
+  paper_fill_slippage_pct: 0.005
+  paper_taker_fee_pct: 0.02
 
 risk_management:
   tp_range_fraction: 0.40

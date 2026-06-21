@@ -38,6 +38,7 @@ from enum import Enum
 from typing import Awaitable, Callable, Dict, List, Optional, Set
 
 import aiohttp
+from aiolimiter import AsyncLimiter
 
 # websockets is an optional hard-dep; linter-safe import with graceful fallback
 try:
@@ -84,8 +85,12 @@ class TradeEvent:
     trade_type:      TradeType
     price:           float    # Trade execution price, e.g. 0.72
     size_usdc:       float    # Trade size in USDC
-    timestamp:       float    # Unix timestamp of the trade
+    timestamp:       float    # Wall-clock Unix timestamp of the source trade
     transaction_hash: str
+    # Monotonic clock at the moment we detected this trade in our poll loop.
+    # Used with time.monotonic() to measure decision_latency (detection → order).
+    # Not comparable across restarts; use timestamp for age_at_detection instead.
+    detected_at: float = field(default_factory=time.monotonic)
 
 
 @dataclass
@@ -126,6 +131,7 @@ class TradeMonitor:
         ws_url:          str   = POLYMARKET_WS_URL,
         data_api_base:   str   = POLYMARKET_DATA_API,
         prime_on_start:  bool  = True,
+        rate_limiter:    Optional[AsyncLimiter] = None,
     ):
         if not tracked_wallets:
             raise ValueError("tracked_wallets must be non-empty.")
@@ -136,6 +142,10 @@ class TradeMonitor:
         self._poll_interval = poll_interval
         self._ws_url        = ws_url
         self._data_api_base = data_api_base
+        # Rate-limit the hot REST poll path to avoid 429s from the Data API.
+        # Default: 25 requests / 60 s (headroom below the assumed 30/min cap).
+        # Inject a custom limiter in main.py to share budget across components.
+        self._rate_limiter: AsyncLimiter = rate_limiter or AsyncLimiter(25, 60)
 
         # Track last-seen trade IDs per wallet to detect new trades.
         # OrderedDict (used as an insertion-ordered set) so overflow eviction is
@@ -368,14 +378,15 @@ class TradeMonitor:
         url    = f"{self._data_api_base}/activity"
         params = {"user": wallet, "limit": _MAX_TRADES_PER_POLL}
 
-        async with session.get(url, params=params) as resp:
-            if resp.status != 200:
-                logger.warning(
-                    "Data API returned %d for wallet %s", resp.status, wallet[:10]
-                )
-                return
+        async with self._rate_limiter:
+            async with session.get(url, params=params) as resp:
+                if resp.status != 200:
+                    logger.warning(
+                        "Data API returned %d for wallet %s", resp.status, wallet[:10]
+                    )
+                    return
 
-            activity: List[dict] = await resp.json()
+                activity: List[dict] = await resp.json()
 
         # COLD-START GUARD: the very first poll for a wallet only seeds the
         # baseline of already-seen trades. Acting on it would copy a backlog of

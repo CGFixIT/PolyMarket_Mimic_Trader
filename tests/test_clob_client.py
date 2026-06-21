@@ -106,3 +106,50 @@ class TestLiveModeGuards:
         live_client.get_order_book = thin_book
         with pytest.raises(InsufficientLiquidityError):
             await live_client.place_order(buy_order(size_usdc=100.0))
+
+
+# ─── Realistic paper fill price ───────────────────────────────────────────────
+
+class TestPaperFillPrice:
+    """Paper mode now returns a slippage+fee-adjusted fill_price so paper PnL
+    reflects live execution costs rather than a zero-cost optimistic fill."""
+
+    @pytest.mark.asyncio
+    async def test_buy_fill_price_above_order_price(self, paper_client):
+        result = await paper_client.place_order(buy_order(price=0.50))
+        assert "fill_price" in result
+        # fill = 0.50 * (1 + 0.005 + 0.02) = 0.5125
+        assert result["fill_price"] == pytest.approx(0.5125)
+
+    @pytest.mark.asyncio
+    async def test_sell_fill_price_below_order_price(self, paper_client):
+        order = Order(market_id="mkt-a", token_id="tok-a", side="SELL",
+                      price=0.80, size_usdc=100.0)
+        result = await paper_client.place_order(order)
+        assert "fill_price" in result
+        # fill = 0.80 * (1 - 0.025) = 0.78
+        assert result["fill_price"] == pytest.approx(0.80 * 0.975)
+
+    @pytest.mark.asyncio
+    async def test_fill_price_clamped_to_one_on_buy(self, paper_client):
+        # Buying near the ceiling: fill price must not exceed 1.0
+        result = await paper_client.place_order(buy_order(price=0.99))
+        assert result["fill_price"] <= 1.0
+
+    @pytest.mark.asyncio
+    async def test_fill_price_floored_to_zero_on_sell(self, paper_client):
+        order = Order(market_id="mkt-a", token_id="tok-a", side="SELL",
+                      price=0.01, size_usdc=1.0)
+        result = await paper_client.place_order(order)
+        assert result["fill_price"] >= 0.0
+
+    @pytest.mark.asyncio
+    async def test_custom_slippage_fee_respected(self):
+        from polymarket_copier.config import AppConfig
+        cfg = AppConfig(mode="paper", bankroll=10_000)
+        cfg.copy_trading.paper_fill_slippage_pct = 0.01
+        cfg.copy_trading.paper_taker_fee_pct = 0.03
+        client = ClobClient(cfg)
+        result = await client.place_order(buy_order(price=0.50))
+        # fill = 0.50 * (1 + 0.01 + 0.03) = 0.52
+        assert result["fill_price"] == pytest.approx(0.52)
