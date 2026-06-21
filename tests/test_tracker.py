@@ -149,8 +149,11 @@ class TestParseTimestamp:
             1_700_000_000, abs=1
         )
 
-    def test_invalid_string_returns_zero(self):
-        assert _parse_timestamp("garbage") == 0.0
+    def test_invalid_string_returns_current_time(self):
+        before = time.time()
+        result = _parse_timestamp("garbage")
+        after = time.time()
+        assert before <= result <= after
 
     def test_millis_normalized_to_seconds(self):
         assert _parse_timestamp(1_700_000_000_000) == pytest.approx(
@@ -160,5 +163,8 @@ class TestParseTimestamp:
     def test_seconds_passthrough(self):
         assert _parse_timestamp(1_700_000_000) == pytest.approx(1_700_000_000)
 
-    def test_unsupported_type_returns_zero(self):
-        assert _parse_timestamp(None) == 0.0
+    def test_unsupported_type_returns_current_time(self):
+        before = time.time()
+        result = _parse_timestamp(None)
+        after = time.time()
+        assert before <= result <= after

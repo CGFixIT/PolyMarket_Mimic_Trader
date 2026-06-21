@@ -422,7 +422,9 @@ def _compute_trader_stats(
 
         elif side == "SELL" and key in open_buys and open_buys[key]:
             buy = open_buys[key].pop(0)  # FIFO matching
-            pnl = (price - buy["price"]) * (size / max(price, _EPSILON))
+            # Use buy-side shares: the position size was fixed at entry, not at exit.
+            buy_shares = buy["size"] / max(buy["price"], _EPSILON)
+            pnl = (price - buy["price"]) * buy_shares
             trade_records.append(TradeRecord(
                 trade_id    = str(item.get("id", "")),
                 market_id   = market_id,
@@ -458,14 +460,19 @@ def _compute_trader_stats(
 
 
 def _parse_timestamp(raw) -> float:
-    """Parse ISO 8601 string or numeric timestamp to Unix float."""
+    """Parse ISO 8601 string or numeric timestamp to Unix float.
+
+    Returns time.time() on parse failure so a transient API glitch doesn't
+    permanently zero out a trader's recency score (which happens when
+    last_trade_time==0 flows into _recency_weight()).
+    """
     if isinstance(raw, str):
         try:
             from datetime import datetime
             return datetime.fromisoformat(raw.replace("Z", "+00:00")).timestamp()
         except ValueError:
-            return 0.0
+            return time.time()
     elif isinstance(raw, (int, float)):
         # If in milliseconds (> year 3000 as seconds ≈ 3.2e10)
         return float(raw) / 1_000.0 if raw > 1e12 else float(raw)
-    return 0.0
+    return time.time()
