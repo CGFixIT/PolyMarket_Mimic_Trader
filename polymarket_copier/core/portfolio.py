@@ -168,6 +168,27 @@ class PortfolioManager:
         row = await cursor.fetchone()
         return float(row[0]) if row else 0.0
 
+    async def get_trader_win_rate(self, trader_address: str) -> tuple[float, int]:
+        """Return (win_rate, sample_size) over CLOSED positions for a trader.
+
+        A closed position with ``realized_pnl > 0`` counts as a win. The win
+        rate is wins / sample_size in [0, 1]. With no closed positions for the
+        trader, returns ``(0.0, 0)`` so callers can gate on sample size.
+        """
+        db = self._require_db()
+        cursor = await db.execute(
+            "SELECT COUNT(*), "
+            "SUM(CASE WHEN realized_pnl > 0 THEN 1 ELSE 0 END) "
+            "FROM positions WHERE trader_address=? AND status='closed'",
+            (trader_address,),
+        )
+        row = await cursor.fetchone()
+        total = int(row[0]) if row and row[0] is not None else 0
+        wins = int(row[1]) if row and row[1] is not None else 0
+        if total == 0:
+            return 0.0, 0
+        return wins / total, total
+
     async def summary(self) -> str:
         db = self._require_db()
         open_count = await self.position_count()

@@ -13,6 +13,7 @@ from polymarket_copier.config import AppConfig
 from polymarket_copier.core.monitor import PriceTick, TradeEvent, TradeType
 from polymarket_copier.core.portfolio import PortfolioManager
 from polymarket_copier.core.risk_manager import ExitReason, ExposureCapError, RiskManager
+from polymarket_copier.core.sizing import kelly_size_usdc
 from polymarket_copier.models.types import Order
 
 logger = logging.getLogger("polymarket_copier")
@@ -129,10 +130,29 @@ class CopyTrader:
             return
 
         # 6. Compute conservative copy size.
-        copy_size_usdc = min(
-            event.size_usdc * self.config.copy_trading.size_multiplier,
-            self.risk.bankroll * self.config.copy_trading.max_trade_pct,
-        )
+        #    Default (kelly_enabled=False): flat size_multiplier formula.
+        #    Opt-in Kelly: when enabled AND the trader has a large enough closed
+        #    sample, size by fractional Kelly using their observed win rate. The
+        #    max_trade_pct cap below is always enforced as a hard ceiling.
+        ct = self.config.copy_trading
+        max_cap_usdc = self.risk.bankroll * ct.max_trade_pct
+        copy_size_usdc = min(event.size_usdc * ct.size_multiplier, max_cap_usdc)
+
+        if ct.kelly_enabled:
+            win_rate, sample = await self.portfolio.get_trader_win_rate(
+                event.wallet_address
+            )
+            if sample >= ct.kelly_min_trades:
+                copy_size_usdc = kelly_size_usdc(
+                    win_rate,
+                    current_price,
+                    self.risk.bankroll,
+                    ct.kelly_fraction_multiplier,
+                    ct.max_trade_pct,
+                )
+
+        # Hard ceiling regardless of sizing path.
+        copy_size_usdc = min(copy_size_usdc, max_cap_usdc)
 
         if copy_size_usdc <= 0 or current_price <= 0:
             return

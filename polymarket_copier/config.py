@@ -39,6 +39,14 @@ class CopyTradingConfig(BaseModel):
     # paper PnL reflects live execution costs rather than zero-cost fills.
     paper_fill_slippage_pct: float = 0.005   # ~0.5% half-spread
     paper_taker_fee_pct: float = 0.02         # Polymarket CLOB taker fee
+    # Edge-aware (fractional-Kelly) position sizing. OFF by default — opt-in, so
+    # enabling it is the only thing that changes copy-size behaviour. When on,
+    # sizing uses kelly_size_usdc() with the trader's observed win rate, but only
+    # once that trader has >= kelly_min_trades closed trades; otherwise the flat
+    # size_multiplier formula is used. The max_trade_pct cap always applies.
+    kelly_enabled: bool = False
+    kelly_fraction_multiplier: float = 0.25
+    kelly_min_trades: int = 20
 
 
 class RiskManagementConfig(BaseModel):
