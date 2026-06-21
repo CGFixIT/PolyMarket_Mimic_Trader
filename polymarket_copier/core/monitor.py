@@ -35,7 +35,7 @@ import time
 from collections import OrderedDict
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Awaitable, Callable, Dict, List, Optional, Set
+from typing import Any, Awaitable, Callable, Dict, List, Optional, Set
 
 import aiohttp
 from aiolimiter import AsyncLimiter
@@ -282,7 +282,8 @@ class TradeMonitor:
                 await self._maybe_update_subscription(ws)
 
                 try:
-                    await self._handle_ws_message(raw_msg)
+                    msg_str = raw_msg.decode() if isinstance(raw_msg, bytes) else raw_msg
+                    await self._handle_ws_message(msg_str)
                 except Exception as exc:
                     logger.warning("WS message parse error: %s | raw=%r", exc, raw_msg[:200])
 
@@ -376,7 +377,7 @@ class TradeMonitor:
     ) -> None:
         """Fetch recent activity for a single wallet and emit TradeEvents for new trades."""
         url    = f"{self._data_api_base}/activity"
-        params = {"user": wallet, "limit": _MAX_TRADES_PER_POLL}
+        params: Dict[str, Any] = {"user": wallet, "limit": _MAX_TRADES_PER_POLL}
 
         async with self._rate_limiter:
             async with session.get(url, params=params) as resp:

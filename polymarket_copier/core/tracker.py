@@ -34,7 +34,7 @@ import math
 import statistics
 import time
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 import aiohttp
 
@@ -261,7 +261,7 @@ class TrackerClient:
                         "Stats fetch failed for %s: %s",
                         entry.get("address", "?")[:10], result
                     )
-                elif result is not None:
+                elif isinstance(result, TraderStats):
                     all_stats.append(result)
 
             self.top_traders   = self._scorer.score_many(all_stats)
@@ -300,7 +300,7 @@ class TrackerClient:
         API: GET /leaderboard?window=all&limit=N
         """
         url    = f"{self._data_api}/leaderboard"
-        params = {"window": "all", "limit": self.cfg.leaderboard_limit}
+        params: Dict[str, Any] = {"window": "all", "limit": self.cfg.leaderboard_limit}
 
         try:
             async with session.get(url, params=params) as resp:
@@ -359,7 +359,7 @@ class TrackerClient:
         API: GET /activity?user={address}&limit=N
         """
         url    = f"{self._data_api}/activity"
-        params = {"user": address, "limit": self.cfg.activity_fetch_limit}
+        params: Dict[str, Any] = {"user": address, "limit": self.cfg.activity_fetch_limit}
 
         try:
             async with session.get(url, params=params) as resp:
