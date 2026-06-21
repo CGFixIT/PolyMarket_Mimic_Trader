@@ -319,6 +319,67 @@ class TestPaperFillPriceInPosition:
         assert positions[0].entry_price == pytest.approx(0.50)
 
 
+# ─── Live fill reconciliation ─────────────────────────────────────────────────
+
+class TestFillReconciliation:
+    """After place_order, the opened position and reserved exposure must reflect
+    the ACTUAL fill, not an assumed full fill. Paper = full fill (no-op)."""
+
+    @pytest.mark.asyncio
+    async def test_paper_full_fill_opens_full_position(self, copier):
+        """PAPER reconciliation is a no-op: full position at the paper fill_price."""
+        await copier.handle_trade_event(buy_event(price=0.50, size=100.0))
+        positions = await copier.portfolio.get_open_positions()
+        assert len(positions) == 1
+        # 50 USDC / 0.50 = 100 shares, fully filled, unchanged from prior behaviour.
+        assert positions[0].size_shares == pytest.approx(100.0)
+        # Full registered notional remains reserved (entry $0.50 * 100 = $50).
+        assert copier.risk.market_exposure("mkt-a") == pytest.approx(50.0)
+
+    @pytest.mark.asyncio
+    async def test_partial_fill_halves_size_and_releases_half_exposure(self, copier):
+        """A 50% fill → position size halved and half the registered exposure freed."""
+        # Copy size = min(0.5*100, 0.02*10000) = $50 → 100 shares @ 0.50.
+        # Registered notional = 0.50 * 100 = $50.
+        copier.clob.place_order = AsyncMock(return_value={
+            "status": "LIVE", "filled_size": 50.0, "avg_price": 0.50,
+        })
+        await copier.handle_trade_event(buy_event(price=0.50, size=100.0, market="mkt-p"))
+        positions = await copier.portfolio.get_open_positions()
+        assert len(positions) == 1
+        assert positions[0].size_shares == pytest.approx(50.0)
+        # Half the $50 notional released → $25 remains reserved.
+        assert copier.risk.market_exposure("mkt-p") == pytest.approx(25.0)
+        assert copier.risk.trader_exposure("0xwhale") == pytest.approx(25.0)
+
+    @pytest.mark.asyncio
+    async def test_zero_fill_releases_all_exposure_and_opens_no_position(self, copier):
+        """A no-fill order opens NO position, subscribes NO token, frees all exposure."""
+        from unittest.mock import MagicMock
+        copier.monitor = MagicMock()
+        copier.clob.place_order = AsyncMock(return_value={
+            "status": "LIVE", "filled_size": 0.0, "avg_price": 0.50,
+        })
+        before = await copier.portfolio.position_count()
+        await copier.handle_trade_event(buy_event(price=0.50, size=100.0, market="mkt-0"))
+        assert await copier.portfolio.position_count() == before
+        # All registered exposure released — market not poisoned.
+        assert copier.risk.market_exposure("mkt-0") == pytest.approx(0.0)
+        assert copier.risk.trader_exposure("0xwhale") == pytest.approx(0.0)
+        # Token must NOT be subscribed for a position that never opened.
+        copier.monitor.subscribe_token.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_matched_amount_field_used_as_fill_size_fallback(self, copier):
+        """When filled_size is absent, matched_amount supplies the filled shares."""
+        copier.clob.place_order = AsyncMock(return_value={
+            "status": "LIVE", "matched_amount": 75.0, "price": 0.50,
+        })
+        await copier.handle_trade_event(buy_event(price=0.50, size=100.0, market="mkt-m"))
+        positions = await copier.portfolio.get_open_positions()
+        assert positions[0].size_shares == pytest.approx(75.0)
+
+
 # ─── Latency logging ─────────────────────────────────────────────────────────
 
 class TestLatencyLogging:

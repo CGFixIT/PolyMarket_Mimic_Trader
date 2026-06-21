@@ -199,12 +199,59 @@ class CopyTrader:
             )
             return
 
-        # Paper mode returns a slippage/fee-adjusted fill_price so PnL tracking
-        # reflects real execution costs rather than an optimistic zero-cost fill.
-        fill_price = (
-            order_result.get("fill_price", current_price)
-            if isinstance(order_result, dict) else current_price
+        # 10a. Reconcile against the ACTUAL fill. In live trading an order can
+        #      partially fill or not fill at all; assuming a full fill would
+        #      overstate pos.size_shares (corrupting PnL, TP/SL share counts) and
+        #      strand the unfilled exposure that build_position() reserved.
+        #      PAPER results report a full fill at fill_price, so this is a no-op
+        #      there and paper behaviour is preserved exactly.
+        filled_shares, avg_fill_price = self._reconcile_fill(
+            order_result, size_shares, current_price
         )
+
+        # Exposure accounting basis: build_position() registered
+        # `entry_price * size_shares` at the PRE-fill current_price into BOTH the
+        # market and trader buckets. We reconcile against THAT same notional so
+        # nothing leaks — releasing the unfilled fraction of the registered
+        # notional (not the fill-priced notional) keeps release + remaining ==
+        # registered exactly.
+        registered_notional = pos.entry_price * pos.size_shares  # == current_price * size_shares
+
+        if filled_shares <= 0.0:
+            # No fill: release the FULL registered notional and abort without
+            # opening a position or subscribing the token.
+            self.risk.release_exposure(
+                pos.market_id, registered_notional, pos.trader_address
+            )
+            logger.info(
+                "Skip: order did not fill (0 shares) — released $%.2f exposure on %s",
+                registered_notional, event.market_id[:10],
+            )
+            return
+
+        if filled_shares < size_shares:
+            # Partial fill: release the unfilled fraction of the REGISTERED
+            # notional so market+trader exposure reflect only the shares actually
+            # acquired. unfilled_fraction is computed against the original
+            # size_shares (the notional basis), so released + remaining ==
+            # registered_notional.
+            unfilled_fraction = (size_shares - filled_shares) / size_shares
+            release_value = registered_notional * unfilled_fraction
+            self.risk.release_exposure(
+                pos.market_id, release_value, pos.trader_address
+            )
+            pos.size_shares = filled_shares
+            logger.info(
+                "Partial fill: %.2f/%.2f shares — released $%.2f unfilled exposure on %s",
+                filled_shares, size_shares, release_value, event.market_id[:10],
+            )
+
+        # Set entry/peak to the actual average fill price. In PAPER mode this is
+        # the slippage/fee-adjusted fill_price (full fill), preserving the prior
+        # behaviour exactly; in LIVE it is the real execution price. This subsumes
+        # the old `fill_price != pos.entry_price` adjustment — applied exactly
+        # once here, never doubled.
+        fill_price = avg_fill_price
         if fill_price != pos.entry_price:
             pos.entry_price = fill_price
             pos.peak_price  = fill_price
@@ -225,6 +272,61 @@ class CopyTrader:
             event.trade_type.value, copy_size_usdc, current_price, fill_price,
             pos.tp_price, pos.sl_price, event.wallet_address[:10],
         )
+
+    @staticmethod
+    def _reconcile_fill(
+        order_result: object,
+        size_shares: float,
+        current_price: float,
+    ) -> tuple[float, float]:
+        """Extract the ACTUAL filled size and average fill price from a CLOB
+        order result, with sensible fallbacks for live-result variants.
+
+        Returns ``(filled_shares, avg_fill_price)``.
+
+        PAPER results (``status == "PAPER"``) always report a FULL fill at the
+        result's ``fill_price`` — reconciliation is a deliberate no-op for them
+        so paper behaviour is byte-for-byte unchanged.
+
+        Live result fields (best-effort, exchange-dependent):
+          - filled size  : ``filled_size`` (shares) → ``matched_amount`` (shares)
+                           → fall back to a full fill of ``size_shares``.
+          - average price: ``avg_price`` → ``fill_price`` → ``price``
+                           → fall back to ``current_price``.
+
+        A non-dict / unrecognised result is treated as a full fill at
+        ``current_price`` (preserving the prior optimistic assumption only when
+        the venue tells us nothing).
+        """
+        if not isinstance(order_result, dict):
+            return size_shares, current_price
+
+        # PAPER → always a full fill at the paper fill_price (no-op path).
+        if order_result.get("status") == "PAPER":
+            avg = order_result.get("fill_price", current_price)
+            return size_shares, float(avg)
+
+        # Live: actual filled size, falling back through known field names. A
+        # missing size field means the venue did not report one → assume full
+        # fill (no behavioural regression vs. the prior code).
+        if "filled_size" in order_result and order_result["filled_size"] is not None:
+            filled_shares = float(order_result["filled_size"])
+        elif "matched_amount" in order_result and order_result["matched_amount"] is not None:
+            filled_shares = float(order_result["matched_amount"])
+        else:
+            filled_shares = size_shares
+
+        # Average fill price, falling back through known field names then to the
+        # pre-fill current_price.
+        for key in ("avg_price", "fill_price", "price"):
+            value = order_result.get(key)
+            if value is not None:
+                avg_fill_price = float(value)
+                break
+        else:
+            avg_fill_price = current_price
+
+        return filled_shares, avg_fill_price
 
     async def handle_price_tick(self, tick: PriceTick) -> None:
         """Called by the monitor's on_price callback for each real-time price update."""
