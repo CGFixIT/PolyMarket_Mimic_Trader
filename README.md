@@ -121,6 +121,9 @@ All trading parameters are in `config.yaml`. The defaults are conservative:
 | `cooldown_after_losses` | 3 | Pause new entries after this many consecutive losses |
 | `cooldown_minutes` | 60 | Length of the post-loss cooldown |
 | `fail_closed_on_missing_data` | true | Skip a copy when market metadata or current price can't be verified |
+| `mirror_source_exits` | true | Exit our position when the tracked trader exits theirs (SOURCE_EXIT) |
+| `paper_fill_slippage_pct` | 0.005 | Half-spread slippage applied to paper-mode fills (~0.5%) |
+| `paper_taker_fee_pct` | 0.02 | Taker fee applied to paper-mode fills (Polymarket CLOB rate ~2%) |
 
 ### Running
 
@@ -153,11 +156,15 @@ The bot enforces multiple layers of protection:
 11. **Staleness gate** -- skips trades older than 12s at detection (alpha has decayed; avoids adverse selection)
 12. **Fail-closed gating** -- skips a copy when market metadata or current price can't be verified
 13. **Cold-start guard** -- the first poll of each tracked wallet seeds a baseline instead of copying the existing backlog
+14. **Source exit mirroring** -- exits our position when the tracked trader exits theirs (aligns holding period with smart money)
+15. **Rate-limited poll path** -- `AsyncLimiter` gates the hot REST poll to prevent 429s from the Data API
+16. **Realistic paper fills** -- paper-mode orders apply slippage + taker fee so paper PnL reflects live execution costs
+17. **Latency instrumentation** -- logs `age_at_detection` and `decision_latency` per trade so the 8s budget is observable
 
 ## Testing
 
 ```bash
-# Run all 144 tests
+# Run all tests
 pytest -v
 
 # Run only the integration tests (end-to-end monitor -> copier wiring)

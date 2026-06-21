@@ -97,6 +97,16 @@ class ClobClient:
             self._check_liquidity(book, order.price, order.size_usdc)
 
         if self.paper_mode:
+            # Simulate realistic fill: apply half-spread slippage + taker fee so
+            # paper PnL reflects live execution costs (not a zero-cost fill).
+            slip = self.config.copy_trading.paper_fill_slippage_pct
+            fee  = self.config.copy_trading.paper_taker_fee_pct
+            cost = slip + fee
+            if order.side == "BUY":
+                fill_price = min(order.price * (1.0 + cost), 1.0)
+            else:
+                fill_price = max(order.price * (1.0 - cost), 0.0)
+
             result = {
                 "status": "PAPER",
                 "market_id": order.market_id,
@@ -104,10 +114,12 @@ class ClobClient:
                 "side": order.side,
                 "size_usdc": order.size_usdc,
                 "price": order.price,
+                "fill_price": fill_price,
             }
             logger.info(
-                "[PAPER] Order: %s $%.2f @ %.4f on %s",
-                order.side, order.size_usdc, order.price, order.market_id,
+                "[PAPER] Order: %s $%.2f @ %.4f (fill %.4f, %.1f%% slip+fee) on %s",
+                order.side, order.size_usdc, order.price, fill_price,
+                cost * 100, order.market_id,
             )
             return result
 

@@ -56,6 +56,7 @@ class ExitReason(Enum):
     DAILY_LOSS_LIMIT  = auto()  # Portfolio circuit breaker
     MARKET_RESOLVING  = auto()  # Within resolution blackout window
     EXPOSURE_CAP      = auto()  # Market-level cap would be breached
+    SOURCE_EXIT       = auto()  # Tracked trader exited; we mirror their exit
 
 
 class Side(Enum):

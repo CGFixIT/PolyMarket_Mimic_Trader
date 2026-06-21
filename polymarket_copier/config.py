@@ -32,6 +32,13 @@ class CopyTradingConfig(BaseModel):
     # has decayed and we'd only be buying into their price impact (adverse
     # selection). 0 disables the gate.
     max_trade_age_seconds: float = 12.0
+    # When True, if a tracked trader sells a token we hold a copy position in,
+    # treat it as an exit signal and close our position (ExitReason.SOURCE_EXIT).
+    mirror_source_exits: bool = True
+    # Paper-mode fill simulation: apply half-spread slippage + taker fee so
+    # paper PnL reflects live execution costs rather than zero-cost fills.
+    paper_fill_slippage_pct: float = 0.005   # ~0.5% half-spread
+    paper_taker_fee_pct: float = 0.02         # Polymarket CLOB taker fee
 
 
 class RiskManagementConfig(BaseModel):
