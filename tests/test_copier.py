@@ -244,3 +244,96 @@ class TestPerTraderAllocationOnCopy:
         assert await copier.portfolio.position_count() == 0
         # And exposure was released (market not poisoned).
         assert copier.risk.trader_exposure("0xwhale") == pytest.approx(0.0)
+
+
+# ─── Source exit mirroring ────────────────────────────────────────────────────
+
+def sell_event(token="tok-a", wallet="0xwhale") -> TradeEvent:
+    return TradeEvent(
+        event_id="sell-1", wallet_address=wallet, market_id="mkt-a",
+        token_id=token, outcome_label="Yes", trade_type=TradeType.SELL,
+        price=0.65, size_usdc=100.0, timestamp=time.time(),
+        transaction_hash="0xsell",
+    )
+
+
+class TestSourceExitMirroring:
+    @pytest.mark.asyncio
+    async def test_source_sell_exits_our_copy_position(self, copier):
+        """When the tracked trader sells a token we hold, we must close our copy."""
+        copier.config.copy_trading.mirror_source_exits = True
+        await copier.handle_trade_event(buy_event(token="tok-a", wallet="0xwhale"))
+        assert await copier.portfolio.position_count() == 1
+
+        await copier.handle_trade_event(sell_event(token="tok-a", wallet="0xwhale"))
+        assert await copier.portfolio.position_count() == 0
+
+    @pytest.mark.asyncio
+    async def test_source_sell_from_different_trader_not_mirrored(self, copier):
+        """A sale by a different wallet sharing the same token must NOT close our copy."""
+        copier.config.copy_trading.mirror_source_exits = True
+        await copier.handle_trade_event(buy_event(token="tok-a", wallet="0xwhale"))
+        assert await copier.portfolio.position_count() == 1
+
+        await copier.handle_trade_event(sell_event(token="tok-a", wallet="0xother"))
+        assert await copier.portfolio.position_count() == 1
+
+    @pytest.mark.asyncio
+    async def test_source_sell_with_no_open_position_is_noop(self, copier):
+        """A source exit with no matching position must not error or open anything."""
+        copier.config.copy_trading.mirror_source_exits = True
+        await copier.handle_trade_event(sell_event(token="tok-a", wallet="0xwhale"))
+        assert await copier.portfolio.position_count() == 0
+
+    @pytest.mark.asyncio
+    async def test_mirror_source_exits_disabled(self, copier):
+        """When mirror_source_exits is False, tracked-trader SELLs produce no action."""
+        copier.config.copy_trading.mirror_source_exits = False
+        await copier.handle_trade_event(buy_event(token="tok-a", wallet="0xwhale"))
+        assert await copier.portfolio.position_count() == 1
+
+        await copier.handle_trade_event(sell_event(token="tok-a", wallet="0xwhale"))
+        assert await copier.portfolio.position_count() == 1
+
+
+# ─── Paper fill price propagated to position entry ────────────────────────────
+
+class TestPaperFillPriceInPosition:
+    @pytest.mark.asyncio
+    async def test_position_entry_price_reflects_fill_slippage(self, copier):
+        """Paper BUY fill_price (slippage+fee) should become the position entry_price."""
+        await copier.handle_trade_event(buy_event(price=0.50))
+        positions = await copier.portfolio.get_open_positions()
+        assert len(positions) == 1
+        # fill_price = 0.50 * (1 + 0.005 + 0.02) = 0.5125; entry > order price
+        assert positions[0].entry_price > 0.50
+        assert positions[0].entry_price == pytest.approx(0.5125)
+
+    @pytest.mark.asyncio
+    async def test_zero_slippage_keeps_entry_at_current_price(self, copier):
+        """With slippage and fee both zero, entry_price equals the order price."""
+        copier.config.copy_trading.paper_fill_slippage_pct = 0.0
+        copier.config.copy_trading.paper_taker_fee_pct = 0.0
+        await copier.handle_trade_event(buy_event(price=0.50))
+        positions = await copier.portfolio.get_open_positions()
+        assert positions[0].entry_price == pytest.approx(0.50)
+
+
+# ─── Latency logging ─────────────────────────────────────────────────────────
+
+class TestLatencyLogging:
+    @pytest.mark.asyncio
+    async def test_age_at_detection_logged_for_buy(self, copier, caplog):
+        import logging
+        with caplog.at_level(logging.INFO, logger="polymarket_copier"):
+            await copier.handle_trade_event(buy_event())
+        age_logged = any("age=" in r.message for r in caplog.records)
+        assert age_logged, "age_at_detection was not logged for BUY event"
+
+    @pytest.mark.asyncio
+    async def test_decision_latency_logged_after_successful_copy(self, copier, caplog):
+        import logging
+        with caplog.at_level(logging.INFO, logger="polymarket_copier"):
+            await copier.handle_trade_event(buy_event())
+        latency_logged = any("decision_latency" in r.message for r in caplog.records)
+        assert latency_logged, "decision_latency was not logged after order placement"

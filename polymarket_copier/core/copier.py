@@ -40,18 +40,29 @@ class CopyTrader:
 
     async def handle_trade_event(self, event: TradeEvent) -> None:
         """Called by TradeMonitor on every new detected trade."""
+        decision_start    = time.monotonic()
+        age_at_detection  = time.time() - event.timestamp
+
         logger.info(
-            "Trade event from %s: %s $%.2f @ %.4f on %s",
+            "Trade event from %s: %s $%.2f @ %.4f on %s | age=%.2fs",
             event.wallet_address[:10], event.trade_type.value,
             event.size_usdc, event.price, event.market_id[:10],
+            age_at_detection,
         )
 
         if self.config.mode == "paper":
             logger.info("[PAPER] Processing trade event %s", event.event_id)
 
-        # 2. Only copy entries, not exits.
+        # 2. Mirror source exits before the non-BUY early return: if the tracked
+        #    trader sold a token we hold, treat it as an exit signal.
         if event.trade_type != TradeType.BUY:
-            logger.debug("Skipping non-BUY trade")
+            if (
+                event.trade_type == TradeType.SELL
+                and self.config.copy_trading.mirror_source_exits
+            ):
+                await self._handle_source_exit(event)
+            else:
+                logger.debug("Skipping non-BUY trade")
             return
 
         # 2a. Portfolio circuit breakers (daily-loss limit, post-loss cooldown).
@@ -170,7 +181,7 @@ class CopyTrader:
         # 10. Place order. On ANY failure, release the exposure build_position
         #     registered so a never-opened position cannot leak the exposure cap.
         try:
-            await self.clob.place_order(order)
+            order_result = await self.clob.place_order(order)
         except InsufficientLiquidityError as e:
             logger.info("Skip: insufficient liquidity — %s", e)
             self.risk.release_exposure(
@@ -184,14 +195,30 @@ class CopyTrader:
             )
             return
 
+        # Paper mode returns a slippage/fee-adjusted fill_price so PnL tracking
+        # reflects real execution costs rather than an optimistic zero-cost fill.
+        fill_price = (
+            order_result.get("fill_price", current_price)
+            if isinstance(order_result, dict) else current_price
+        )
+        if fill_price != pos.entry_price:
+            pos.entry_price = fill_price
+            pos.peak_price  = fill_price
+
+        decision_latency = time.monotonic() - decision_start
+        logger.info(
+            "Latency | age_at_detection=%.2fs decision_latency=%.3fs",
+            age_at_detection, decision_latency,
+        )
+
         await self.portfolio.open_position(pos)
 
         if self.monitor:
             self.monitor.subscribe_token(event.token_id)
 
         logger.info(
-            "Copied: %s $%.2f @ %.4f | TP=%.4f SL=%.4f | from %s",
-            event.trade_type.value, copy_size_usdc, current_price,
+            "Copied: %s $%.2f @ %.4f (fill %.4f) | TP=%.4f SL=%.4f | from %s",
+            event.trade_type.value, copy_size_usdc, current_price, fill_price,
             pos.tp_price, pos.sl_price, event.wallet_address[:10],
         )
 
@@ -239,6 +266,27 @@ class CopyTrader:
             "Exited [%s]: %s pnl=$%.4f @ %.4f",
             reason.name, pos.position_id, pnl, price,
         )
+
+    async def _handle_source_exit(self, event: TradeEvent) -> None:
+        """Exit our copy position when the tracked trader exits theirs.
+
+        Only acts when we hold a position for the same token AND it was copied
+        from the same trader — a coincidental sale by a different wallet is
+        irrelevant to our thesis for the position.
+        """
+        pos = await self.portfolio.get_position_by_token(event.token_id)
+        if pos is None or pos.trader_address != event.wallet_address:
+            return
+
+        logger.info(
+            "Source exit signal: trader %s sold %s — closing copy position %s",
+            event.wallet_address[:10], event.token_id[:10], pos.position_id,
+        )
+        # Use the freshest available price; fall back to the event price.
+        exit_price = await self.gamma.get_market_price(event.token_id)
+        if exit_price is None:
+            exit_price = event.price
+        await self._exit_position(pos, exit_price, ExitReason.SOURCE_EXIT)
 
     async def check_all_exits(self) -> None:
         """Poll-based exit check fallback (when WS price feed is unavailable)."""
