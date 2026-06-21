@@ -47,7 +47,7 @@ trade.
 limiter, and `tracker.py` does the same. With 5 wallets every 8 s that is
 ~37.5 req/min against `/activity` *plus* tracker refreshes — over the assumed
 30/60 s budget. A single `429` burst means **dropped polls = missed trades**.
-`CONTRIBUTING.md` already flags this as known debt.
+`CONTRIBUTING.MD` already flags this as known debt.
 
 **Fix:** create one shared `aiohttp.ClientSession` + one shared `AsyncLimiter`
 in an injected `HttpClient` object, and pass it to `DataClient`, `GammaClient`,
@@ -108,9 +108,10 @@ herd against the Data API. Spread polls across the interval (or use a token
 bucket) to smooth load and reduce 429 risk.
 
 ### 1.7 WebSocket does **not** reduce *entry* latency (clarification)
-The README implies the WS feed mitigates the 8 s delay. It does not — WS only
-streams prices for tokens you **already hold**. Entry detection is 100 % on the
-REST poll. The only ways to truly cut entry latency are: (a) poll faster within
+A common misconception is that the WS feed mitigates the 8 s entry delay. It does
+not — WS only streams prices for tokens you **already hold** (the README is
+explicit that WS is for real-time prices/exits and REST polling detects new
+trades). Entry detection is 100 % on the REST poll. The only ways to truly cut entry latency are: (a) poll faster within
 rate limits, (b) the staleness gate so you skip races you have already lost, and
 (c) if/when Polymarket exposes a wallet-filtered or on-chain trade stream,
 subscribe to it. Consider an on-chain mempool/log subscription (Polygon
