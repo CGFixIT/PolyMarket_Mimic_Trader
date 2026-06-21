@@ -69,10 +69,10 @@ class TrackerConfig:
 
 @dataclass
 class TradeRecord:
-    """A single resolved trade used for PnL statistics."""
+    """A single resolved trade used for return statistics."""
     trade_id:    str
     market_id:   str
-    pnl:         float   # Positive = profit, negative = loss
+    pnl:         float   # ROI fraction (pnl_dollars / cost_basis); +0.10 = +10%
     is_win:      bool
     executed_at: float   # Unix timestamp
 
@@ -82,25 +82,30 @@ class TraderStats:
     """Full statistical profile of a trader derived from their activity."""
     address:         str
     pseudonym:       str
-    total_pnl:       float
+    total_pnl:       float          # Leaderboard aggregate PnL, in DOLLARS
     trade_count:     int
     win_rate:        float
+    # Per round-trip RETURN ON CAPITAL (ROI fractions, not dollars). This keeps
+    # the Sharpe proxy / mean / stddev size-independent. total_pnl above stays
+    # in dollars for the min_total_pnl eligibility filter.
     pnl_per_trade:   List[float]    = field(default_factory=list)
     last_trade_time: float          = 0.0
 
     @property
     def mean_pnl(self) -> float:
+        """Mean per-trade ROI fraction (e.g. 0.10 = +10% average return)."""
         return statistics.mean(self.pnl_per_trade) if self.pnl_per_trade else 0.0
 
     @property
     def stddev_pnl(self) -> float:
+        """Std-dev of per-trade ROI fractions (return volatility)."""
         if len(self.pnl_per_trade) < 2:
             return 0.0
         return statistics.stdev(self.pnl_per_trade)
 
     @property
     def sharpe_proxy(self) -> float:
-        """Mean PnL / StdDev PnL. Undefined if no variance (constant returns)."""
+        """Mean return / StdDev return. Undefined if no variance (constant returns)."""
         denom = self.stddev_pnl
         if denom < _EPSILON:
             return self.mean_pnl / _EPSILON if self.mean_pnl > 0 else 0.0
@@ -386,23 +391,33 @@ def _compute_trader_stats(
     """
     Derive TraderStats from raw activity records.
 
-    PnL per trade is estimated from (exit_price − entry_price) × size for
-    completed round-trips. Partial data is excluded rather than estimated.
+    SCORING ON RETURN ON CAPITAL (ROI)
+    -----------------------------------
+    Per-trade values stored in pnl_per_trade are ROI fractions, not absolute dollars.
+    For each completed round-trip:
+        pnl_dollars = (exit_price − entry_price) × buy_shares
+        cost_basis  = entry_price × buy_shares   (capital put at risk)
+        roi         = pnl_dollars / cost_basis
+
+    This makes the Sharpe proxy, mean, and stddev size-independent: a trader who
+    consistently makes 5% per trade scores the same whether notional was $10 or
+    $10,000 — key for a small-bankroll copy bot. total_pnl stays in dollars (the
+    leaderboard aggregate used by min_total_pnl eligibility filter).
 
     RESOLUTION AWARENESS
     --------------------
-    A common Polymarket alpha pattern is buying a mispriced YES/NO token and
-    HOLDING it to resolution — the position is never SOLD, it is REDEEMED when
-    the market resolves (winning shares pay $1.00 each, losing shares pay $0.00).
-    We treat a redemption/claim record as a realizing event so these
-    held-to-resolution outcomes are counted, not silently dropped.
+    A common Polymarket alpha is buying a mispriced YES/NO token and HOLDING it to
+    resolution — never SOLD, but REDEEMED when the market resolves (winning shares
+    pay $1.00, losing shares pay $0.00). We treat redemption/claim records as realizing
+    events so held-to-resolution outcomes are counted, not silently dropped.
 
-    LIMITATION (honest accounting): we can only credit redemptions we actually
-    OBSERVE in the activity feed. Winning positions emit a redeem/claim record,
-    so they are captured. Losing positions that expire worthless typically emit
-    NO redeem record at all — there is nothing to redeem — so those losses
-    remain uncounted. This biases the observed win_rate UPWARD for any trader
-    who holds losers to worthless expiry. Monitor this when interpreting stats.
+    LIMITATION (honest accounting): we can only credit redemptions we OBSERVE in the
+    activity feed. Winning positions emit a redeem/claim record (captured). Losing
+    positions expiring worthless typically emit NO redeem record — nothing to redeem —
+    so those losses remain uncounted. This biases observed win_rate UPWARD for traders
+    who hold losers to worthless expiry. Monitor this when interpreting stats.
+
+    Partial data is excluded rather than estimated.
     """
     trade_records: List[TradeRecord] = []
     last_trade_ts = 0.0
@@ -447,12 +462,18 @@ def _compute_trader_stats(
                 buy = open_buys[key].pop(0)  # FIFO: oldest open buy first
                 # Use buy-side shares: position size was fixed at entry.
                 buy_shares = buy["size"] / max(buy["price"], _EPSILON)
-                pnl = (payout_price - buy["price"]) * buy_shares
+                pnl_dollars = (payout_price - buy["price"]) * buy_shares
+                # Score by ROI, not absolute dollars.
+                cost_basis = buy["price"] * buy_shares
+                if cost_basis <= _EPSILON:
+                    # Zero-cost basis makes ROI undefined; skip it.
+                    continue
+                roi = pnl_dollars / cost_basis
                 trade_records.append(TradeRecord(
                     trade_id    = str(item.get("id", "")),
                     market_id   = market_id,
-                    pnl         = pnl,
-                    is_win      = pnl > 0,
+                    pnl         = roi,                # ROI fraction
+                    is_win      = pnl_dollars > 0,
                     executed_at = ts,
                 ))
 
@@ -465,12 +486,18 @@ def _compute_trader_stats(
             buy = open_buys[key].pop(0)  # FIFO matching
             # Use buy-side shares: the position size was fixed at entry, not at exit.
             buy_shares = buy["size"] / max(buy["price"], _EPSILON)
-            pnl = (price - buy["price"]) * buy_shares
+            pnl_dollars = (price - buy["price"]) * buy_shares
+            # Score by return on capital, not absolute dollars.
+            cost_basis = buy["price"] * buy_shares
+            if cost_basis <= _EPSILON:
+                # Zero-cost basis (price ~0) makes ROI undefined; skip it.
+                continue
+            roi = pnl_dollars / cost_basis
             trade_records.append(TradeRecord(
                 trade_id    = str(item.get("id", "")),
                 market_id   = market_id,
-                pnl         = pnl,
-                is_win      = pnl > 0,
+                pnl         = roi,            # ROI fraction, e.g. 0.10 = +10%
+                is_win      = pnl_dollars > 0,
                 executed_at = ts,
             ))
 

@@ -155,7 +155,9 @@ class TestComputeTraderStats:
         stats = _compute_trader_stats("0xabc", "Name", 50000, activity)
         assert stats.trade_count == 1
         assert stats.win_rate == 1.0
-        assert stats.pnl_per_trade == [100.0]
+        # buy_shares = 100 / 0.50 = 200; pnl_dollars = (1.0 - 0.5) * 200 = 100.0
+        # cost_basis = 0.50 * 200 = 100.0; roi = 100.0 / 100.0 = 1.0 (100% return)
+        assert stats.pnl_per_trade == [pytest.approx(1.0)]
 
     def test_redeem_defaults_to_payout_one_when_no_price(self):
         # No explicit per-share price on the redeem record → default to 1.0.
@@ -169,8 +171,9 @@ class TestComputeTraderStats:
         stats = _compute_trader_stats("0xabc", "Name", 50000, activity)
         assert stats.trade_count == 1
         assert stats.win_rate == 1.0
-        # 40 / 0.40 = 100 shares; pnl = (1.0 - 0.40) * 100 = 60.0
-        assert stats.pnl_per_trade == [pytest.approx(60.0)]
+        # buy_shares = 40 / 0.40 = 100; pnl_dollars = (1.0 - 0.40) * 100 = 60.0
+        # cost_basis = 0.40 * 100 = 40.0; roi = 60.0 / 40.0 = 1.5 (150% return)
+        assert stats.pnl_per_trade == [pytest.approx(1.5)]
 
     def test_buy_without_sell_or_redeem_not_counted(self):
         # Unchanged behavior: an open buy with no realizing event is excluded.
@@ -205,8 +208,82 @@ class TestComputeTraderStats:
         stats = _compute_trader_stats("0xabc", "Name", 50000, activity)
         assert stats.trade_count == 2
         assert stats.win_rate == 1.0
-        # round-trip: (0.60-0.50)*(100/0.50)=20.0 ; redeem: (1.0-0.20)*(20/0.20)=80.0
-        assert sorted(stats.pnl_per_trade) == [pytest.approx(20.0), pytest.approx(80.0)]
+        # round-trip: pnl_dollars=20.0, cost_basis=100.0, roi=0.2
+        # redeem: pnl_dollars=80.0, cost_basis=20.0, roi=4.0
+        assert sorted(stats.pnl_per_trade) == [pytest.approx(0.2), pytest.approx(4.0)]
+
+
+class TestReturnsBasedScoring:
+    """pnl_per_trade stores per-trade ROI (return on capital), not dollars."""
+
+    @staticmethod
+    def _round_trip(market, entry_price, notional_usdc, exit_price):
+        """One BUY/SELL pair. notional_usdc = entry_price * shares (cost basis)."""
+        return [
+            {"id": f"b-{market}", "type": "trade", "side": "BUY",
+             "market": market, "asset": f"tok-{market}",
+             "price": str(entry_price), "size": str(notional_usdc),
+             "timestamp": 1_700_000_000},
+            {"id": f"s-{market}", "type": "trade", "side": "SELL",
+             "market": market, "asset": f"tok-{market}",
+             "price": str(exit_price), "size": "1", "timestamp": 1_700_001_000},
+        ]
+
+    def test_roi_stored_not_dollars(self):
+        # Buy 100 USDC @ 0.50 -> 200 shares; sell @ 0.65.
+        # dollars = (0.65-0.50)*200 = 30; cost_basis = 0.50*200 = 100; roi = 0.30
+        stats = _compute_trader_stats(
+            "0xabc", "Name", 50000, self._round_trip("m", 0.50, 100, 0.65)
+        )
+        assert stats.pnl_per_trade == [pytest.approx(0.30)]
+
+    def test_same_roi_different_notionals_is_size_independent(self):
+        # Three +10% trades on wildly different notionals must yield identical
+        # per-trade returns, proving the score no longer tracks position size.
+        activity = (
+            self._round_trip("small", 0.20, 10, 0.22)      # +10%
+            + self._round_trip("medium", 0.50, 1_000, 0.55)  # +10%
+            + self._round_trip("large", 0.80, 100_000, 0.88)  # +10%
+        )
+        stats = _compute_trader_stats("0xabc", "Name", 50000, activity)
+        assert stats.trade_count == 3
+        assert stats.pnl_per_trade == [
+            pytest.approx(0.10), pytest.approx(0.10), pytest.approx(0.10)
+        ]
+        # Identical returns -> zero variance, positive mean.
+        assert stats.mean_pnl == pytest.approx(0.10)
+        assert stats.stddev_pnl == pytest.approx(0.0)
+        assert stats.win_rate == 1.0
+
+    def test_mean_stddev_sharpe_reflect_returns(self):
+        # +20% then -10% round-trips.
+        activity = (
+            self._round_trip("a", 0.50, 1_000, 0.60)   # +20%
+            + self._round_trip("b", 0.50, 1_000, 0.45)  # -10%
+        )
+        stats = _compute_trader_stats("0xabc", "Name", 50000, activity)
+        assert stats.pnl_per_trade == [pytest.approx(0.20), pytest.approx(-0.10)]
+        assert stats.mean_pnl == pytest.approx(0.05)
+        # sharpe = mean / stddev, both on returns
+        assert stats.sharpe_proxy == pytest.approx(
+            stats.mean_pnl / stats.stddev_pnl
+        )
+
+    def test_loss_has_negative_roi_and_not_a_win(self):
+        stats = _compute_trader_stats(
+            "0xabc", "Name", 50000, self._round_trip("m", 0.50, 100, 0.40)
+        )
+        assert stats.pnl_per_trade == [pytest.approx(-0.20)]
+        assert stats.win_rate == 0.0
+
+    def test_total_pnl_stays_dollar_aggregate(self):
+        # total_pnl is the leaderboard dollar figure, untouched by ROI scoring.
+        stats = _compute_trader_stats(
+            "0xabc", "Name", 50000, self._round_trip("m", 0.50, 100, 0.65)
+        )
+        assert stats.total_pnl == 50000
+        # ...while per-trade values are fractional returns, not dollars.
+        assert max(stats.pnl_per_trade) < 1.0
 
 
 class TestParseTimestamp:
