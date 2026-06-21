@@ -388,6 +388,21 @@ def _compute_trader_stats(
 
     PnL per trade is estimated from (exit_price − entry_price) × size for
     completed round-trips. Partial data is excluded rather than estimated.
+
+    RESOLUTION AWARENESS
+    --------------------
+    A common Polymarket alpha pattern is buying a mispriced YES/NO token and
+    HOLDING it to resolution — the position is never SOLD, it is REDEEMED when
+    the market resolves (winning shares pay $1.00 each, losing shares pay $0.00).
+    We treat a redemption/claim record as a realizing event so these
+    held-to-resolution outcomes are counted, not silently dropped.
+
+    LIMITATION (honest accounting): we can only credit redemptions we actually
+    OBSERVE in the activity feed. Winning positions emit a redeem/claim record,
+    so they are captured. Losing positions that expire worthless typically emit
+    NO redeem record at all — there is nothing to redeem — so those losses
+    remain uncounted. This biases the observed win_rate UPWARD for any trader
+    who holds losers to worthless expiry. Monitor this when interpreting stats.
     """
     trade_records: List[TradeRecord] = []
     last_trade_ts = 0.0
@@ -395,8 +410,15 @@ def _compute_trader_stats(
     # Pair BUY and SELL events for the same market/token to estimate PnL.
     open_buys: Dict[Tuple[str, str], List[dict]] = {}
 
+    # Activity record types that REALIZE an open position by paying it out at
+    # resolution (vs. selling it on the order book). Matched case-insensitively
+    # against the same `type` field the BUY/SELL branch parses.
+    _REDEEM_TYPES = ("redeem", "claim", "reward")
+
     for item in activity:
-        if item.get("type", "").lower() not in ("trade", "buy", "sell"):
+        item_type = str(item.get("type", "")).lower()
+        is_redeem = item_type in _REDEEM_TYPES
+        if item_type not in ("trade", "buy", "sell") and not is_redeem:
             continue
 
         market_id = str(item.get("market", item.get("conditionId", "")))
@@ -415,7 +437,26 @@ def _compute_trader_stats(
 
         key = (market_id, token_id)
 
-        if side == "BUY":
+        if is_redeem:
+            # A redemption closes any still-open FIFO buy(s) for this
+            # (market, token) at the payout price. Winning Polymarket shares
+            # redeem at $1.00. If the record carries an explicit per-share
+            # price, prefer it; otherwise default winning redemptions to 1.0.
+            payout_price = price if price > 0 else 1.0
+            while key in open_buys and open_buys[key]:
+                buy = open_buys[key].pop(0)  # FIFO: oldest open buy first
+                # Use buy-side shares: position size was fixed at entry.
+                buy_shares = buy["size"] / max(buy["price"], _EPSILON)
+                pnl = (payout_price - buy["price"]) * buy_shares
+                trade_records.append(TradeRecord(
+                    trade_id    = str(item.get("id", "")),
+                    market_id   = market_id,
+                    pnl         = pnl,
+                    is_win      = pnl > 0,
+                    executed_at = ts,
+                ))
+
+        elif side == "BUY":
             if key not in open_buys:
                 open_buys[key] = []
             open_buys[key].append({"price": price, "size": size, "ts": ts})
