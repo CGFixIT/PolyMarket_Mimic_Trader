@@ -41,6 +41,9 @@ async def run_bot(config_path: Optional[str] = None, mode: Optional[str] = None)
         time_exit_min_range_move=config.risk_management.time_exit_min_range_move,
         daily_loss_limit_pct=config.risk_management.daily_loss_limit_pct,
         max_market_exposure_pct=config.risk_management.max_market_exposure_pct,
+        max_trader_allocation=config.copy_trading.max_trader_allocation,
+        cooldown_after_losses=config.risk_management.cooldown_after_losses,
+        cooldown_minutes=config.risk_management.cooldown_minutes,
         resolution_blackout_hours=config.risk_management.resolution_blackout_hours,
     )
     risk_manager = RiskManager(config=risk_cfg, bankroll=config.bankroll)
@@ -50,9 +53,12 @@ async def run_bot(config_path: Optional[str] = None, mode: Optional[str] = None)
 
     # Restore open positions to risk_manager exposure tracking on restart
     for pos in await portfolio.get_open_positions():
+        value = pos.entry_price * pos.size_shares
         risk_manager._market_exposure[pos.market_id] = (
-            risk_manager._market_exposure.get(pos.market_id, 0.0)
-            + pos.entry_price * pos.size_shares
+            risk_manager._market_exposure.get(pos.market_id, 0.0) + value
+        )
+        risk_manager._trader_exposure[pos.trader_address] = (
+            risk_manager._trader_exposure.get(pos.trader_address, 0.0) + value
         )
 
     gamma_client = GammaClient()

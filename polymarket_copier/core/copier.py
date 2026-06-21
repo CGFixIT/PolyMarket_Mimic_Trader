@@ -54,17 +54,46 @@ class CopyTrader:
             logger.debug("Skipping non-BUY trade")
             return
 
-        # 3. Resolution blackout.
+        # 2a. Portfolio circuit breakers (daily-loss limit, post-loss cooldown).
+        #     Checked on the ENTRY path so they cannot be bypassed by opening new
+        #     positions — evaluate() only governs exits of already-open positions.
+        halt_reason = self.risk.is_trading_halted()
+        if halt_reason:
+            logger.warning("Skip: trading halted — %s", halt_reason)
+            return
+
+        # 2b. Staleness gate. After this many seconds the source's alpha has
+        #     decayed and we'd only be buying into their price impact (adverse
+        #     selection). 0 disables the gate.
+        max_age = self.config.copy_trading.max_trade_age_seconds
+        if max_age > 0:
+            age = time.time() - event.timestamp
+            if age > max_age:
+                logger.info("Skip: trade is %.1fs old > max %.1fs", age, max_age)
+                return
+
+        # 3. Resolution blackout. Fail CLOSED if market metadata is unavailable —
+        #    without it we cannot verify resolve time or volume.
         market = await self.gamma.get_market(event.market_id)
+        if market is None and self.config.risk_management.fail_closed_on_missing_data:
+            logger.info("Skip: market data unavailable for %s (fail-closed)",
+                        event.market_id[:10])
+            return
         if market and market.resolve_time:
             hours_to_resolve = (market.resolve_time.timestamp() - time.time()) / 3600
             if 0 < hours_to_resolve < _RESOLUTION_BLACKOUT_HOURS:
                 logger.info("Skip: market resolves in %.1fh (blackout)", hours_to_resolve)
                 return
 
-        # 4. Price deviation check.
+        # 4. Price deviation check. Fail CLOSED if the current price is unknown —
+        #    falling back to the (stale) event price makes the deviation check
+        #    trivially pass and trades on data we couldn't verify.
         current_price = await self.gamma.get_market_price(event.token_id)
         if current_price is None:
+            if self.config.risk_management.fail_closed_on_missing_data:
+                logger.info("Skip: current price unavailable for token %s (fail-closed)",
+                            event.token_id[:10])
+                return
             current_price = event.price
 
         if event.price > 0:
@@ -144,11 +173,15 @@ class CopyTrader:
             await self.clob.place_order(order)
         except InsufficientLiquidityError as e:
             logger.info("Skip: insufficient liquidity — %s", e)
-            self.risk.release_exposure(pos.market_id, pos.entry_price * pos.size_shares)
+            self.risk.release_exposure(
+                pos.market_id, pos.entry_price * pos.size_shares, pos.trader_address
+            )
             return
         except Exception as e:
             logger.error("Order placement failed: %s", e)
-            self.risk.release_exposure(pos.market_id, pos.entry_price * pos.size_shares)
+            self.risk.release_exposure(
+                pos.market_id, pos.entry_price * pos.size_shares, pos.trader_address
+            )
             return
 
         await self.portfolio.open_position(pos)

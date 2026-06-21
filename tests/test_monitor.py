@@ -161,3 +161,57 @@ class TestTradeMonitor:
         ])
         await monitor._handle_ws_message(raw)
         assert len(ticks) == 0
+
+
+class TestColdStartPriming:
+    def test_first_poll_primes_without_emitting(self):
+        monitor = TradeMonitor(tracked_wallets=["0xabc"], on_trade=_noop_trade)
+        activity = [
+            {"id": "t1", "type": "trade", "side": "BUY"},
+            {"id": "t2", "type": "trade", "side": "SELL"},
+        ]
+        # prime=True seeds the baseline but returns nothing.
+        primed = monitor._filter_new_trades("0xabc", activity, prime=True)
+        assert primed == []
+        # Both ids are now recorded as seen.
+        assert "t1" in monitor._seen_trade_ids["0xabc"]
+        assert "t2" in monitor._seen_trade_ids["0xabc"]
+        # A subsequent normal poll of the same activity emits nothing (all seen).
+        assert monitor._filter_new_trades("0xabc", activity) == []
+
+    def test_new_trade_after_priming_is_emitted(self):
+        monitor = TradeMonitor(tracked_wallets=["0xabc"], on_trade=_noop_trade)
+        monitor._filter_new_trades("0xabc", [{"id": "t1", "type": "trade", "side": "BUY"}], prime=True)
+        new = monitor._filter_new_trades(
+            "0xabc",
+            [
+                {"id": "t1", "type": "trade", "side": "BUY"},
+                {"id": "t2", "type": "trade", "side": "BUY"},
+            ],
+        )
+        assert len(new) == 1
+        assert new[0]["id"] == "t2"
+
+    def test_prime_on_start_false_acts_immediately(self):
+        monitor = TradeMonitor(
+            tracked_wallets=["0xabc"], on_trade=_noop_trade, prime_on_start=False,
+        )
+        assert "0xabc" in monitor._primed_wallets
+
+
+class TestSeenEvictionFIFO:
+    def test_oldest_ids_evicted_first(self):
+        from polymarket_copier.core.monitor import _MAX_TRADES_PER_POLL
+        monitor = TradeMonitor(tracked_wallets=["0xabc"], on_trade=_noop_trade)
+        # Insert well over the 2x cap so eviction runs.
+        n = _MAX_TRADES_PER_POLL * 2 + 10
+        activity = [
+            {"id": f"t{i}", "type": "trade", "side": "BUY"} for i in range(n)
+        ]
+        monitor._filter_new_trades("0xabc", activity)
+        seen = monitor._seen_trade_ids["0xabc"]
+        # Size is bounded to the 2x cap.
+        assert len(seen) <= _MAX_TRADES_PER_POLL * 2
+        # The OLDEST ids were dropped; the most recent ids are retained.
+        assert f"t{n - 1}" in seen
+        assert "t0" not in seen

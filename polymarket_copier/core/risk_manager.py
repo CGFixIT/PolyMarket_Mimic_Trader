@@ -95,6 +95,11 @@ class RiskConfig:
     # --- Portfolio-level circuit breakers ---
     daily_loss_limit_pct: float     = 0.03   # Stop all trading if daily loss > 3% bankroll
     max_market_exposure_pct: float  = 0.08   # Max 8% of bankroll in any one market
+    max_trader_allocation: float    = 0.05   # Max 5% of bankroll copied from any one trader
+
+    # --- Post-loss cooldown ---
+    cooldown_after_losses: int      = 3      # Pause entries after N consecutive losses
+    cooldown_minutes: int           = 60     # Length of that pause
 
     # --- Market resolution blackout ---
     resolution_blackout_hours: float = 24.0
@@ -172,6 +177,11 @@ class RiskManager:
         self._day_start_ts     = _midnight_utc()
         # market_id → total $ value currently allocated in that market
         self._market_exposure: Dict[str, float] = {}
+        # trader_address → total $ value currently copied from that trader
+        self._trader_exposure: Dict[str, float] = {}
+        # Post-loss cooldown state
+        self._consecutive_losses: int = 0
+        self._cooldown_until: float   = 0.0
 
     # ── Position factory ──────────────────────────────────────────────────────
 
@@ -198,6 +208,7 @@ class RiskManager:
         tp, sl         = self._compute_thresholds(entry_price)
         position_value = entry_price * size_shares
         self._assert_exposure_cap(market_id, position_value)
+        self._assert_trader_allocation(trader_address, position_value)
 
         pos = Position(
             position_id    = position_id,
@@ -215,6 +226,9 @@ class RiskManager:
 
         self._market_exposure[market_id] = (
             self._market_exposure.get(market_id, 0.0) + position_value
+        )
+        self._trader_exposure[trader_address] = (
+            self._trader_exposure.get(trader_address, 0.0) + position_value
         )
 
         logger.info(
@@ -326,6 +340,12 @@ class RiskManager:
             0.0,
             self._market_exposure.get(pos.market_id, 0.0) - released,
         )
+        self._trader_exposure[pos.trader_address] = max(
+            0.0,
+            self._trader_exposure.get(pos.trader_address, 0.0) - released,
+        )
+
+        self._update_cooldown(pnl)
 
         logger.info(
             "record_exit | id=%s exit=%.4f pnl=%+.4f daily_pnl=%+.4f bankroll=%.2f",
@@ -333,23 +353,83 @@ class RiskManager:
         )
         return pnl
 
+    def _update_cooldown(self, pnl: float) -> None:
+        """Track consecutive losses and engage a cooldown after a losing streak.
+        Any win resets the streak."""
+        if pnl < 0:
+            self._consecutive_losses += 1
+            if (
+                self.cfg.cooldown_after_losses > 0
+                and self._consecutive_losses >= self.cfg.cooldown_after_losses
+            ):
+                self._cooldown_until = time.time() + self.cfg.cooldown_minutes * 60
+                logger.warning(
+                    "COOLDOWN engaged for %d min after %d consecutive losses",
+                    self.cfg.cooldown_minutes, self._consecutive_losses,
+                )
+                self._consecutive_losses = 0
+        else:
+            self._consecutive_losses = 0
+
+    def is_trading_halted(self) -> Optional[str]:
+        """Return a reason string if NEW entries should be blocked, else None.
+
+        Checked on the ENTRY path so the daily-loss circuit breaker and the
+        post-loss cooldown cannot be bypassed by opening fresh positions — the
+        per-tick evaluate() only governs EXITS of already-open positions.
+        """
+        self._maybe_reset_daily_window()
+
+        daily_loss_limit = -(self.bankroll * self.cfg.daily_loss_limit_pct)
+        if self._daily_pnl <= daily_loss_limit:
+            return (
+                f"daily loss limit (daily_pnl=${self._daily_pnl:.2f} "
+                f"<= ${daily_loss_limit:.2f})"
+            )
+
+        remaining = self._cooldown_until - time.time()
+        if remaining > 0:
+            return (
+                f"post-loss cooldown active for {remaining / 60.0:.1f} more min"
+            )
+
+        return None
+
     # ── Public helpers ────────────────────────────────────────────────────────
 
     def market_exposure(self, market_id: str) -> float:
         """Current $ allocated in a given market."""
         return self._market_exposure.get(market_id, 0.0)
 
-    def release_exposure(self, market_id: str, value: float) -> None:
+    def release_exposure(
+        self, market_id: str, value: float, trader_address: Optional[str] = None
+    ) -> None:
         """Release exposure registered by build_position() for a position that was
         never actually opened (e.g. order placement failed). Unlike record_exit,
-        this does NOT touch bankroll or daily PnL — no trade occurred."""
+        this does NOT touch bankroll or daily PnL — no trade occurred.
+
+        Pass ``trader_address`` to also release the per-trader allocation that
+        build_position() reserved; otherwise it would leak and slowly choke off
+        future copies from that trader."""
         self._market_exposure[market_id] = max(
             0.0, self._market_exposure.get(market_id, 0.0) - value
         )
+        if trader_address is not None:
+            self._trader_exposure[trader_address] = max(
+                0.0, self._trader_exposure.get(trader_address, 0.0) - value
+            )
 
     def market_exposure_cap(self) -> float:
         """Current cap in $ terms (changes as bankroll changes)."""
         return self.bankroll * self.cfg.max_market_exposure_pct
+
+    def trader_exposure(self, trader_address: str) -> float:
+        """Current $ copied from a given trader across all open positions."""
+        return self._trader_exposure.get(trader_address, 0.0)
+
+    def trader_allocation_cap(self) -> float:
+        """Per-trader allocation cap in $ terms (changes as bankroll changes)."""
+        return self.bankroll * self.cfg.max_trader_allocation
 
     def daily_pnl(self) -> float:
         return self._daily_pnl
@@ -391,6 +471,16 @@ class RiskManager:
                 f"Market {market_id}: existing=${current:.2f} + new=${new_value:.2f} "
                 f"= ${current + new_value:.2f} > cap=${cap:.2f} "
                 f"({self.cfg.max_market_exposure_pct * 100:.0f}% of ${self.bankroll:.2f})"
+            )
+
+    def _assert_trader_allocation(self, trader_address: str, new_value: float) -> None:
+        cap     = self.trader_allocation_cap()
+        current = self._trader_exposure.get(trader_address, 0.0)
+        if current + new_value > cap:
+            raise ExposureCapError(
+                f"Trader {trader_address[:10]}: existing=${current:.2f} + "
+                f"new=${new_value:.2f} = ${current + new_value:.2f} > cap=${cap:.2f} "
+                f"({self.cfg.max_trader_allocation * 100:.0f}% of ${self.bankroll:.2f})"
             )
 
     def _maybe_reset_daily_window(self) -> None:
