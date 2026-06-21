@@ -175,3 +175,72 @@ class TestHandlePriceTick:
         # No position for this token → no error
         await copier.handle_price_tick(PriceTick(token_id="ghost", price=0.55))
         assert await copier.portfolio.position_count() == 0
+
+
+class TestStalenessGate:
+    @pytest.mark.asyncio
+    async def test_stale_trade_skipped(self, copier):
+        copier.config.copy_trading.max_trade_age_seconds = 12
+        event = buy_event()
+        # 60s old → past the 12s budget, alpha decayed.
+        stale = TradeEvent(**{**event.__dict__, "timestamp": time.time() - 60})
+        await copier.handle_trade_event(stale)
+        assert await copier.portfolio.position_count() == 0
+
+    @pytest.mark.asyncio
+    async def test_fresh_trade_passes(self, copier):
+        copier.config.copy_trading.max_trade_age_seconds = 12
+        await copier.handle_trade_event(buy_event())  # timestamp = now
+        assert await copier.portfolio.position_count() == 1
+
+    @pytest.mark.asyncio
+    async def test_zero_disables_gate(self, copier):
+        copier.config.copy_trading.max_trade_age_seconds = 0
+        event = buy_event()
+        old = TradeEvent(**{**event.__dict__, "timestamp": time.time() - 10_000})
+        await copier.handle_trade_event(old)
+        assert await copier.portfolio.position_count() == 1
+
+
+class TestTradingHaltOnEntry:
+    @pytest.mark.asyncio
+    async def test_entry_blocked_when_halted(self, copier):
+        # Daily-loss breaker can no longer be bypassed by opening a new position.
+        from unittest.mock import MagicMock
+        copier.risk.is_trading_halted = MagicMock(return_value="daily loss limit")
+        await copier.handle_trade_event(buy_event())
+        assert await copier.portfolio.position_count() == 0
+
+
+class TestFailClosed:
+    @pytest.mark.asyncio
+    async def test_skip_when_market_unavailable(self, copier, gamma):
+        gamma.get_market = AsyncMock(return_value=None)
+        await copier.handle_trade_event(buy_event())
+        assert await copier.portfolio.position_count() == 0
+
+    @pytest.mark.asyncio
+    async def test_skip_when_price_unavailable(self, copier, gamma):
+        gamma.get_market_price = AsyncMock(return_value=None)
+        await copier.handle_trade_event(buy_event())
+        assert await copier.portfolio.position_count() == 0
+
+    @pytest.mark.asyncio
+    async def test_fail_open_when_disabled(self, copier, gamma):
+        copier.config.risk_management.fail_closed_on_missing_data = False
+        gamma.get_market_price = AsyncMock(return_value=None)
+        # With fail-open, falls back to event price and proceeds.
+        await copier.handle_trade_event(buy_event())
+        assert await copier.portfolio.position_count() == 1
+
+
+class TestPerTraderAllocationOnCopy:
+    @pytest.mark.asyncio
+    async def test_trader_cap_blocks_excess_copies(self, copier):
+        # Cap a trader at a tiny allocation; a normal copy should breach it.
+        copier.risk.cfg.max_trader_allocation = 0.001   # $10 on $10k bankroll
+        # Copy size = min(0.5*100, 0.02*10000)= $50 > $10 cap → blocked.
+        await copier.handle_trade_event(buy_event(size=100.0))
+        assert await copier.portfolio.position_count() == 0
+        # And exposure was released (market not poisoned).
+        assert copier.risk.trader_exposure("0xwhale") == pytest.approx(0.0)

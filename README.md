@@ -113,9 +113,14 @@ All trading parameters are in `config.yaml`. The defaults are conservative:
 | `sl_range_fraction` | 0.25 | Stop loss at 25% of remaining downside |
 | `trailing_stop_fraction` | 0.15 | Trail 15% below peak-to-SL gap |
 | `max_market_exposure_pct` | 0.08 | Max 8% of bankroll in any single market |
-| `daily_loss_limit_pct` | 0.03 | Halt all trading after 3% daily loss |
+| `max_trader_allocation` | 0.05 | Max 5% of bankroll copied from any single trader |
+| `daily_loss_limit_pct` | 0.03 | Halt all trading (incl. new entries) after 3% daily loss |
 | `resolution_blackout_hours` | 24 | Never enter markets resolving within 24h |
 | `max_concurrent_positions` | 10 | Maximum open positions at once |
+| `max_trade_age_seconds` | 12 | Skip trades older than this at detection (alpha decay / adverse selection) |
+| `cooldown_after_losses` | 3 | Pause new entries after this many consecutive losses |
+| `cooldown_minutes` | 60 | Length of the post-loss cooldown |
+| `fail_closed_on_missing_data` | true | Skip a copy when market metadata or current price can't be verified |
 
 ### Running
 
@@ -139,11 +144,15 @@ The bot enforces multiple layers of protection:
 2. **Trailing stop** -- locks in profit as price rises, never drops below hard SL
 3. **Time exit** -- closes stale positions after 48h if price barely moved
 4. **Per-market exposure cap** -- max 8% of bankroll in any single market
-5. **Daily loss circuit breaker** -- halts all trading after 3% daily loss
-6. **Resolution blackout** -- never enters or holds positions in markets resolving within 24h
-7. **Pre-trade depth check** -- verifies ask-side liquidity before placing BUY orders (live mode)
-8. **Per-trader drawdown stop** -- stops copying a trader after cumulative -8% session loss
-9. **Cooldown** -- pauses after 3 consecutive losing trades
+5. **Per-trader allocation cap** -- max 5% of bankroll copied from any single trader
+6. **Daily loss circuit breaker** -- halts all trading, including new entries, after 3% daily loss
+7. **Resolution blackout** -- never enters or holds positions in markets resolving within 24h
+8. **Pre-trade depth check** -- verifies ask-side liquidity before placing BUY orders (live mode)
+9. **Per-trader drawdown stop** -- stops copying a trader after cumulative -8% session loss
+10. **Cooldown** -- pauses new entries after 3 consecutive losing trades
+11. **Staleness gate** -- skips trades older than 12s at detection (alpha has decayed; avoids adverse selection)
+12. **Fail-closed gating** -- skips a copy when market metadata or current price can't be verified
+13. **Cold-start guard** -- the first poll of each tracked wallet seeds a baseline instead of copying the existing backlog
 
 ## Testing
 

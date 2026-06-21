@@ -53,7 +53,12 @@ class _FakeSession:
 
 @pytest.fixture
 def config() -> AppConfig:
-    return AppConfig(mode="paper", bankroll=10_000)
+    cfg = AppConfig(mode="paper", bankroll=10_000)
+    # These wiring tests use a fixed historical timestamp in BUY_ACTIVITY, so
+    # neutralize the staleness gate — they exercise the monitor->copier dispatch,
+    # not freshness filtering (which has its own dedicated tests).
+    cfg.copy_trading.max_trade_age_seconds = 0
+    return cfg
 
 
 @pytest.fixture
@@ -85,6 +90,7 @@ def wired(config, portfolio, gamma):
         tracked_wallets=["0xWHALE"],
         on_trade=copier.handle_trade_event,   # async def
         on_price=copier.handle_price_tick,     # async def
+        prime_on_start=False,   # act on the first poll (cold-start guard tested separately)
     )
     copier.monitor = monitor
     return monitor, copier

@@ -27,7 +27,12 @@ CFG      = RiskConfig()   # Default config — all tests use this unless overrid
 
 @pytest.fixture
 def rm() -> RiskManager:
-    return RiskManager(config=RiskConfig(), bankroll=BANKROLL)
+    # max_trader_allocation=1.0 keeps the per-trader cap from interfering with the
+    # market-exposure and threshold tests; the trader cap has dedicated tests in
+    # TestTraderAllocationCap below.
+    return RiskManager(
+        config=RiskConfig(max_trader_allocation=1.0), bankroll=BANKROLL
+    )
 
 
 def build(
@@ -395,3 +400,109 @@ class TestResolutionBlackout:
             entry_price=0.50, size_shares=100.0, resolve_time=resolve_ts
         )
         assert rm.evaluate(pos, 0.55) == ExitReason.MARKET_RESOLVING
+
+
+# ─── [I] Per-Trader Allocation Cap ────────────────────────────────────────────
+
+class TestTraderAllocationCap:
+    """max_trader_allocation caps total $ copied from any single trader."""
+
+    def _rm(self, pct=0.05):
+        return RiskManager(
+            config=RiskConfig(max_trader_allocation=pct), bankroll=BANKROLL
+        )
+
+    def test_cap_enforced_for_one_trader(self):
+        rm = self._rm(0.05)   # cap = 5% * 10k = $500
+        rm.build_position("p1", "mkt_A", "t1", "0xWHALE",
+                          entry_price=0.50, size_shares=800.0)   # $400
+        with pytest.raises(ExposureCapError, match="Trader"):
+            rm.build_position("p2", "mkt_B", "t2", "0xWHALE",
+                              entry_price=0.50, size_shares=400.0)  # +$200 → $600 > $500
+
+    def test_different_traders_independent(self):
+        rm = self._rm(0.05)
+        rm.build_position("p1", "mkt_A", "t1", "0xWHALE",
+                          entry_price=0.50, size_shares=900.0)   # $450
+        # A different trader has its own independent cap.
+        rm.build_position("p2", "mkt_B", "t2", "0xOTHER",
+                          entry_price=0.50, size_shares=900.0)   # $450
+        assert rm.trader_exposure("0xWHALE") == pytest.approx(450.0)
+        assert rm.trader_exposure("0xOTHER") == pytest.approx(450.0)
+
+    def test_exposure_released_on_exit(self):
+        rm = self._rm(0.05)
+        pos = rm.build_position("p1", "mkt_A", "t1", "0xWHALE",
+                                entry_price=0.50, size_shares=900.0)  # $450
+        rm.record_exit(pos, 0.50)
+        assert rm.trader_exposure("0xWHALE") == pytest.approx(0.0)
+
+    def test_release_exposure_frees_trader_allocation(self):
+        rm = self._rm(0.05)
+        rm.build_position("p1", "mkt_A", "t1", "0xWHALE",
+                          entry_price=0.50, size_shares=900.0)  # $450
+        rm.release_exposure("mkt_A", 450.0, "0xWHALE")
+        assert rm.trader_exposure("0xWHALE") == pytest.approx(0.0)
+        # And the trader can be copied again afterwards.
+        rm.build_position("p2", "mkt_A", "t1", "0xWHALE",
+                          entry_price=0.50, size_shares=900.0)
+
+
+# ─── [J] Trading Halt: daily-loss breaker + post-loss cooldown ────────────────
+
+class TestTradingHalt:
+
+    def test_not_halted_by_default(self, rm):
+        assert rm.is_trading_halted() is None
+
+    def test_halted_after_daily_loss_limit(self):
+        rm = RiskManager(
+            config=RiskConfig(
+                daily_loss_limit_pct=0.03,
+                max_market_exposure_pct=1.0,   # keep market/trader caps out of the
+                max_trader_allocation=1.0,     # way so we can drive the loss
+            ),
+            bankroll=BANKROLL,
+        )
+        # Drive daily PnL below -3% * 10k = -$300 via a losing exit.
+        pos = rm.build_position("p1", "mkt_A", "t1", "0xA",
+                                entry_price=0.50, size_shares=4_000.0)  # $2000 notional
+        rm.record_exit(pos, 0.40)   # -0.10 * 4000 = -$400 < -$300
+        reason = rm.is_trading_halted()
+        assert reason is not None
+        assert "daily loss" in reason
+
+    def test_cooldown_engages_after_consecutive_losses(self):
+        rm = RiskManager(
+            config=RiskConfig(
+                cooldown_after_losses=3, cooldown_minutes=60,
+                daily_loss_limit_pct=1.0,  # keep daily breaker out of the way
+            ),
+            bankroll=BANKROLL,
+        )
+        for i in range(3):
+            pos = rm.build_position(f"p{i}", "mkt_A", f"t{i}", "0xA",
+                                    entry_price=0.50, size_shares=100.0)
+            rm.record_exit(pos, 0.49)   # small loss
+        reason = rm.is_trading_halted()
+        assert reason is not None
+        assert "cooldown" in reason
+
+    def test_win_resets_loss_streak(self):
+        rm = RiskManager(
+            config=RiskConfig(
+                cooldown_after_losses=3, cooldown_minutes=60, daily_loss_limit_pct=1.0,
+            ),
+            bankroll=BANKROLL,
+        )
+        for i in range(2):
+            pos = rm.build_position(f"p{i}", "mkt_A", f"t{i}", "0xA",
+                                    entry_price=0.50, size_shares=100.0)
+            rm.record_exit(pos, 0.49)   # two losses
+        win = rm.build_position("pw", "mkt_A", "tw", "0xA",
+                                entry_price=0.50, size_shares=100.0)
+        rm.record_exit(win, 0.60)       # a win resets the streak
+        loss = rm.build_position("pl", "mkt_A", "tl", "0xA",
+                                 entry_price=0.50, size_shares=100.0)
+        rm.record_exit(loss, 0.49)      # one more loss — streak is 1, not 3
+        assert rm.is_trading_halted() is None

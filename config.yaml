@@ -16,6 +16,7 @@ copy_trading:
   max_price_deviation: 0.02
   max_concurrent_positions: 10
   min_market_volume: 5000
+  max_trade_age_seconds: 12
 
 risk_management:
   tp_range_fraction: 0.40
@@ -31,6 +32,7 @@ risk_management:
   drawdown_stop_pct: 0.08
   cooldown_after_losses: 3
   cooldown_minutes: 60
+  fail_closed_on_missing_data: true
 
 logging:
   level: INFO

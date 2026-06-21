@@ -10,7 +10,11 @@ from polymarket_copier.core.risk_manager import ExitReason, RiskConfig, RiskMana
 
 @pytest.fixture
 def rm() -> RiskManager:
-    return RiskManager(config=RiskConfig(), bankroll=10_000.0)
+    # max_trader_allocation=1.0 keeps the per-trader cap out of these tests, which
+    # exercise portfolio persistence, not the allocation control (tested elsewhere).
+    return RiskManager(
+        config=RiskConfig(max_trader_allocation=1.0), bankroll=10_000.0
+    )
 
 
 @pytest.fixture

@@ -28,6 +28,10 @@ class CopyTradingConfig(BaseModel):
     max_price_deviation: float = 0.02
     max_concurrent_positions: int = 10
     min_market_volume: float = 5000
+    # Skip trades older than this at detection time — by then the source's alpha
+    # has decayed and we'd only be buying into their price impact (adverse
+    # selection). 0 disables the gate.
+    max_trade_age_seconds: float = 12.0
 
 
 class RiskManagementConfig(BaseModel):
@@ -44,6 +48,9 @@ class RiskManagementConfig(BaseModel):
     drawdown_stop_pct: float = 0.08
     cooldown_after_losses: int = 3
     cooldown_minutes: int = 60
+    # Fail CLOSED (skip) when market metadata or current price can't be fetched,
+    # rather than trading on missing/stale data.
+    fail_closed_on_missing_data: bool = True
 
 
 class LoggingConfig(BaseModel):

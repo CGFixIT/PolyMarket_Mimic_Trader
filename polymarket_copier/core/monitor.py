@@ -32,6 +32,7 @@ import asyncio
 import json
 import logging
 import time
+from collections import OrderedDict
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Awaitable, Callable, Dict, List, Optional, Set
@@ -124,6 +125,7 @@ class TradeMonitor:
         poll_interval:   float = _POLL_INTERVAL_SEC,
         ws_url:          str   = POLYMARKET_WS_URL,
         data_api_base:   str   = POLYMARKET_DATA_API,
+        prime_on_start:  bool  = True,
     ):
         if not tracked_wallets:
             raise ValueError("tracked_wallets must be non-empty.")
@@ -135,8 +137,22 @@ class TradeMonitor:
         self._ws_url        = ws_url
         self._data_api_base = data_api_base
 
-        # Track last-seen trade IDs per wallet to detect new trades
-        self._seen_trade_ids: Dict[str, Set[str]] = {w: set() for w in self._wallets}
+        # Track last-seen trade IDs per wallet to detect new trades.
+        # OrderedDict (used as an insertion-ordered set) so overflow eviction is
+        # FIFO — popping the OLDEST id, never an arbitrary recent one that could
+        # then be re-detected and re-copied as a duplicate.
+        self._seen_trade_ids: Dict[str, "OrderedDict[str, None]"] = {
+            w: OrderedDict() for w in self._wallets
+        }
+
+        # Wallets whose first poll has been used to PRIME the seen-set (seed the
+        # baseline without copying). Prevents a cold start from copying up to
+        # _MAX_TRADES_PER_POLL historical trades per wallet on launch. When
+        # prime_on_start is False, every wallet is pre-marked as primed so the
+        # first poll acts immediately (used in tests / replay scenarios).
+        self._primed_wallets: Set[str] = (
+            set() if prime_on_start else set(self._wallets)
+        )
 
         # Token IDs currently subscribed in the WebSocket
         self._subscribed_tokens: Set[str] = set()
@@ -361,7 +377,20 @@ class TradeMonitor:
 
             activity: List[dict] = await resp.json()
 
-        new_trades = self._filter_new_trades(wallet, activity)
+        # COLD-START GUARD: the very first poll for a wallet only seeds the
+        # baseline of already-seen trades. Acting on it would copy a backlog of
+        # stale historical trades the moment the bot starts.
+        prime = wallet not in self._primed_wallets
+
+        new_trades = self._filter_new_trades(wallet, activity, prime=prime)
+
+        if prime:
+            self._primed_wallets.add(wallet)
+            logger.info(
+                "Primed wallet %s baseline (%d trade(s) seen, none copied)",
+                wallet[:10], len(self._seen_trade_ids[wallet]),
+            )
+            return
 
         if new_trades:
             logger.info(
@@ -378,10 +407,15 @@ class TradeMonitor:
         self,
         wallet:   str,
         activity: List[dict],
+        prime:    bool = False,
     ) -> List[dict]:
         """
         Return only trades not previously seen for this wallet.
         Updates self._seen_trade_ids in place. Caps memory growth.
+
+        When ``prime`` is True the seen-set is still seeded from ``activity`` but
+        an empty list is returned — used on a wallet's first poll so the existing
+        backlog is recorded as the baseline rather than copied (cold-start guard).
         """
         seen       = self._seen_trade_ids[wallet]
         new_trades = []
@@ -394,13 +428,14 @@ class TradeMonitor:
             if not trade_id or trade_id in seen:
                 continue
 
-            new_trades.append(item)
-            seen.add(trade_id)
+            seen[trade_id] = None
+            if not prime:
+                new_trades.append(item)
 
-        if len(seen) > _MAX_TRADES_PER_POLL * 2:
-            overflow = len(seen) - _MAX_TRADES_PER_POLL
-            for _ in range(overflow):
-                seen.pop()
+        # FIFO eviction: drop the OLDEST ids first so a recently-seen id can
+        # never be evicted and then re-detected as "new" on the next poll.
+        while len(seen) > _MAX_TRADES_PER_POLL * 2:
+            seen.popitem(last=False)
 
         return new_trades
 
