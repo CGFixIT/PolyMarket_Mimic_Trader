@@ -142,6 +142,72 @@ class TestComputeTraderStats:
         stats = _compute_trader_stats("0xabc", "Name", 50000, activity)
         assert stats.pnl_per_trade == []
 
+    def test_buy_then_redeem_at_one_is_winning_trade(self):
+        # Held-to-resolution: buy a token at 0.50, redeem at $1.00 payout.
+        # 100 / 0.50 = 200 shares; pnl = (1.0 - 0.5) * 200 = 100.0.
+        activity = [
+            {"id": "b1", "type": "trade", "side": "BUY", "market": "m",
+             "asset": "a", "price": "0.50", "size": "100",
+             "timestamp": 1_700_000_000},
+            {"id": "r1", "type": "redeem", "market": "m", "asset": "a",
+             "price": "1.0", "size": "200", "timestamp": 1_700_002_000},
+        ]
+        stats = _compute_trader_stats("0xabc", "Name", 50000, activity)
+        assert stats.trade_count == 1
+        assert stats.win_rate == 1.0
+        assert stats.pnl_per_trade == [100.0]
+
+    def test_redeem_defaults_to_payout_one_when_no_price(self):
+        # No explicit per-share price on the redeem record → default to 1.0.
+        activity = [
+            {"id": "b1", "type": "trade", "side": "BUY", "market": "m",
+             "asset": "a", "price": "0.40", "size": "40",
+             "timestamp": 1_700_000_000},
+            {"id": "r1", "type": "claim", "market": "m", "asset": "a",
+             "timestamp": 1_700_002_000},
+        ]
+        stats = _compute_trader_stats("0xabc", "Name", 50000, activity)
+        assert stats.trade_count == 1
+        assert stats.win_rate == 1.0
+        # 40 / 0.40 = 100 shares; pnl = (1.0 - 0.40) * 100 = 60.0
+        assert stats.pnl_per_trade == [pytest.approx(60.0)]
+
+    def test_buy_without_sell_or_redeem_not_counted(self):
+        # Unchanged behavior: an open buy with no realizing event is excluded.
+        activity = [
+            {"id": "b1", "type": "trade", "side": "BUY", "market": "m",
+             "asset": "a", "price": "0.50", "size": "100",
+             "timestamp": 1_700_000_000},
+        ]
+        stats = _compute_trader_stats("0xabc", "Name", 50000, activity)
+        # No realizing event → no TradeRecord produced (no win/loss credited).
+        # (trade_count falls back to len(activity) when there are zero records,
+        # matching the pre-existing no-trades fallback path — unchanged.)
+        assert stats.pnl_per_trade == []
+        assert stats.win_rate == 0.0
+
+    def test_mixed_sell_round_trip_and_held_to_resolution_redeem(self):
+        # One actively-sold round-trip plus one held-to-resolution redeem on a
+        # different market — both must be counted.
+        activity = [
+            {"id": "b1", "type": "trade", "side": "BUY", "market": "m1",
+             "asset": "a1", "price": "0.50", "size": "100",
+             "timestamp": 1_700_000_000},
+            {"id": "s1", "type": "trade", "side": "SELL", "market": "m1",
+             "asset": "a1", "price": "0.60", "size": "60",
+             "timestamp": 1_700_001_000},
+            {"id": "b2", "type": "trade", "side": "BUY", "market": "m2",
+             "asset": "a2", "price": "0.20", "size": "20",
+             "timestamp": 1_700_000_500},
+            {"id": "r2", "type": "redeem", "market": "m2", "asset": "a2",
+             "price": "1.0", "size": "100", "timestamp": 1_700_003_000},
+        ]
+        stats = _compute_trader_stats("0xabc", "Name", 50000, activity)
+        assert stats.trade_count == 2
+        assert stats.win_rate == 1.0
+        # round-trip: (0.60-0.50)*(100/0.50)=20.0 ; redeem: (1.0-0.20)*(20/0.20)=80.0
+        assert sorted(stats.pnl_per_trade) == [pytest.approx(20.0), pytest.approx(80.0)]
+
 
 class TestParseTimestamp:
     def test_iso_string(self):
