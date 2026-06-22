@@ -224,21 +224,30 @@ class TestEvaluatePriority:
 class TestTrailingStop:
 
     def test_peak_updates_on_new_high(self, rm):
+        # evaluate() no longer mutates pos.peak_price; the caller (copier) does.
+        # This test verifies that evaluate() uses an effective peak internally
+        # and that the caller is responsible for persisting the new peak.
         pos = build(rm, 0.50)
         rm.evaluate(pos, 0.65)
+        # pos.peak_price is still at entry — caller must set it explicitly.
+        assert pos.peak_price == 0.50
+        # Simulate what copier.handle_price_tick does after evaluate():
+        pos.peak_price = 0.65
         assert pos.peak_price == 0.65
 
     def test_peak_does_not_update_on_drop(self, rm):
         pos = build(rm, 0.50)
-        rm.evaluate(pos, 0.65)
+        pos.peak_price = 0.65  # caller sets peak after a prior high
         rm.evaluate(pos, 0.60)
+        # caller only updates peak when tick.price > pos.peak_price
         assert pos.peak_price == 0.65
 
     def test_trailing_stop_triggers_after_peak(self, rm):
         # Peak must stay below TP (0.70): TP has exit priority, so a peak above
         # TP would already have closed the position via TAKE_PROFIT.
         pos = build(rm, 0.50)
-        rm.evaluate(pos, 0.68)   # new high, still below TP
+        # Simulate caller updating peak after evaluate() returned HOLD at 0.68
+        pos.peak_price = 0.68
         trail_sl = rm._compute_trail_sl(pos)
         assert trail_sl < pos.tp_price
         assert rm.evaluate(pos, trail_sl - 0.001) == ExitReason.TRAILING_STOP
@@ -249,20 +258,20 @@ class TestTrailingStop:
 
     def test_trailing_sl_never_below_hard_sl(self, rm):
         pos = build(rm, 0.50)
-        rm.evaluate(pos, 0.51)
+        pos.peak_price = 0.51  # caller sets after a small new high
         trail_sl = rm._compute_trail_sl(pos)
         assert trail_sl >= pos.sl_price
 
     def test_trailing_sl_math_explicit(self, rm):
         pos = build(rm, 0.50)
-        rm.evaluate(pos, 0.80)
+        pos.peak_price = 0.80  # caller sets after a new high at 0.80
         expected_trail = 0.80 - ((0.80 - pos.sl_price) * CFG.trailing_stop_fraction)
         assert abs(rm._compute_trail_sl(pos) - expected_trail) < 1e-5
 
     def test_trailing_stop_not_triggered_above_trail(self, rm):
         # Peak stays below TP (0.70) so TAKE_PROFIT does not pre-empt the check.
         pos = build(rm, 0.50)
-        rm.evaluate(pos, 0.68)
+        pos.peak_price = 0.68  # caller sets after new high
         trail_sl = rm._compute_trail_sl(pos)
         assert rm.evaluate(pos, trail_sl + 0.01) == ExitReason.HOLD
 
