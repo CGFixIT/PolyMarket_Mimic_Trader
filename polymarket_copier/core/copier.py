@@ -42,14 +42,18 @@ class CopyTrader:
 
     async def handle_trade_event(self, event: TradeEvent) -> None:
         """Called by TradeMonitor on every new detected trade."""
-        decision_start    = time.monotonic()
-        age_at_detection  = time.time() - event.timestamp
+        decision_start = time.monotonic()
+        # detection_latency: monotonic (parse to here) — reliable, no clock skew
+        detection_latency = decision_start - event.detected_at
+        # wall_age: wall-clock age of the underlying on-chain trade
+        wall_age = time.time() - event.timestamp
 
         logger.info(
-            "Trade event from %s: %s $%.2f @ %.4f on %s | age=%.2fs",
+            "Trade event from %s: %s $%.2f @ %.4f on %s | "
+            "wall_age=%.2fs detect_latency=%.3fs",
             event.wallet_address[:10], event.trade_type.value,
             event.size_usdc, event.price, event.market_id[:10],
-            age_at_detection,
+            wall_age, detection_latency,
         )
 
         if self.config.mode == "paper":
@@ -80,9 +84,13 @@ class CopyTrader:
         #     selection). 0 disables the gate.
         max_age = self.config.copy_trading.max_trade_age_seconds
         if max_age > 0:
-            age = time.time() - event.timestamp
-            if age > max_age:
-                logger.info("Skip: trade is %.1fs old > max %.1fs", age, max_age)
+            # Sanity-clamp wall_age against NTP jumps: negative means clock skew
+            # (treat as fresh), >3600 means definitely stale regardless of config.
+            if wall_age > 3600:
+                logger.info("Skip: trade is %.1fs old (>1h, always stale)", wall_age)
+                return
+            if wall_age > 0 and wall_age > max_age:
+                logger.info("Skip: trade is %.1fs old > max %.1fs", wall_age, max_age)
                 return
 
         # 3+4. Fetch market metadata and current price in parallel — both are
@@ -157,7 +165,7 @@ class CopyTrader:
         if copy_size_usdc <= 0 or current_price <= 0:
             return
 
-        size_shares = copy_size_usdc / current_price
+        size_shares = copy_size_usdc / max(current_price, 1e-6)
 
         resolve_ts = None
         if market and market.resolve_time:
@@ -278,8 +286,8 @@ class CopyTrader:
 
         decision_latency = time.monotonic() - decision_start
         logger.info(
-            "Latency | age_at_detection=%.2fs decision_latency=%.3fs",
-            age_at_detection, decision_latency,
+            "Latency | wall_age=%.2fs detect_latency=%.3fs decision_latency=%.3fs",
+            wall_age, detection_latency, decision_latency,
         )
 
         await self.portfolio.open_position(pos)
@@ -356,16 +364,13 @@ class CopyTrader:
         # a poll-based check happens to catch them.
         positions = await self.portfolio.get_positions_by_token(tick.token_id)
         for pos in positions:
-            # evaluate() raises pos.peak_price in-memory when the price makes a new
-            # high. Capture the prior peak BEFORE the call so we can detect and
-            # persist that new high — comparing tick.price against the just-mutated
-            # pos.peak_price would always be False and the DB peak would stay pinned
-            # at entry.
-            prev_peak = pos.peak_price
+            # evaluate() uses effective_peak internally without mutating pos.peak_price.
+            # We own the DB write here so concurrent tick handlers can't race on
+            # in-memory state.
             reason = self.risk.evaluate(pos, tick.price)
 
-            if pos.peak_price > prev_peak:
-                await self.portfolio.update_peak_price(pos.position_id, pos.peak_price)
+            if tick.price > pos.peak_price:
+                await self.portfolio.update_peak_price(pos.position_id, tick.price)
 
             if reason != ExitReason.HOLD:
                 await self._exit_position(pos, tick.price, reason)
@@ -379,10 +384,30 @@ class CopyTrader:
             size_usdc=max(price * pos.size_shares, _EPSILON_USDC),
         )
 
-        try:
-            await self.clob.place_order(exit_order)
-        except Exception as e:
-            logger.error("Exit order failed for %s: %s", pos.position_id, e)
+        # Retry up to 3 times with exponential backoff. Only close the DB record
+        # after the order succeeds — a failed order leaves the position open so
+        # the next price tick or poll-based sweep can reattempt.
+        placed = False
+        for attempt in range(3):
+            try:
+                await self.clob.place_order(exit_order)
+                placed = True
+                break
+            except Exception as e:
+                if attempt < 2:
+                    logger.warning(
+                        "Exit order attempt %d/3 failed for %s: %s",
+                        attempt + 1, pos.position_id, e,
+                    )
+                    await asyncio.sleep(2 ** attempt)
+                else:
+                    logger.error(
+                        "Exit order permanently failed for %s after 3 attempts: %s — "
+                        "manual intervention required",
+                        pos.position_id, e,
+                    )
+
+        if not placed:
             return
 
         pnl = await self.portfolio.close_position(pos.position_id, price, reason)
@@ -437,6 +462,6 @@ class CopyTrader:
                 await self._exit_position(pos, price, reason)
 
 
-# Smallest non-zero order size to keep the Order model's gt=0 validation happy
-# when a position would otherwise round to zero notional.
-_EPSILON_USDC = 1e-6
+# Minimum order size ($0.01) — keeps Order model's gt=0 validation happy and
+# is a sensible practical floor for real order books.
+_EPSILON_USDC = 0.01
