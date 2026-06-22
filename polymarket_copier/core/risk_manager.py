@@ -34,10 +34,11 @@ EXAMPLES (defaults: tp_fraction=0.40, sl_fraction=0.25)
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import time
-from dataclasses import dataclass, field
 from datetime import datetime, timezone
+from dataclasses import dataclass, field
 from enum import Enum, auto
 from typing import Dict, Optional, Tuple
 
@@ -181,13 +182,14 @@ class RiskManager:
         self._market_exposure: Dict[str, float] = {}
         # trader_address → total $ value currently copied from that trader
         self._trader_exposure: Dict[str, float] = {}
+        self._exposure_lock = asyncio.Lock()
         # Post-loss cooldown state
         self._consecutive_losses: int = 0
         self._cooldown_until: float   = 0.0
 
     # ── Position factory ──────────────────────────────────────────────────────
 
-    def build_position(
+    async def build_position(
         self,
         position_id:    str,
         market_id:      str,
@@ -207,31 +209,38 @@ class RiskManager:
         """
         _assert_valid_price(entry_price, "entry_price")
 
-        tp, sl         = self._compute_thresholds(entry_price)
+        tp, sl = self._compute_thresholds(entry_price)
+        if tp <= sl:
+            raise InvalidPriceError(
+                f"Degenerate thresholds at entry={entry_price}: tp={tp} <= sl={sl}"
+            )
+
         position_value = entry_price * size_shares
-        self._assert_exposure_cap(market_id, position_value)
-        self._assert_trader_allocation(trader_address, position_value)
 
-        pos = Position(
-            position_id    = position_id,
-            market_id      = market_id,
-            token_id       = token_id,
-            trader_address = trader_address,
-            side           = Side.BUY,
-            entry_price    = entry_price,
-            size_shares    = size_shares,
-            tp_price       = tp,
-            sl_price       = sl,
-            peak_price     = entry_price,
-            resolve_time   = resolve_time,
-        )
+        async with self._exposure_lock:
+            self._assert_exposure_cap(market_id, position_value)
+            self._assert_trader_allocation(trader_address, position_value)
 
-        self._market_exposure[market_id] = (
-            self._market_exposure.get(market_id, 0.0) + position_value
-        )
-        self._trader_exposure[trader_address] = (
-            self._trader_exposure.get(trader_address, 0.0) + position_value
-        )
+            pos = Position(
+                position_id    = position_id,
+                market_id      = market_id,
+                token_id       = token_id,
+                trader_address = trader_address,
+                side           = Side.BUY,
+                entry_price    = entry_price,
+                size_shares    = size_shares,
+                tp_price       = tp,
+                sl_price       = sl,
+                peak_price     = entry_price,
+                resolve_time   = resolve_time,
+            )
+
+            self._market_exposure[market_id] = (
+                self._market_exposure.get(market_id, 0.0) + position_value
+            )
+            self._trader_exposure[trader_address] = (
+                self._trader_exposure.get(trader_address, 0.0) + position_value
+            )
 
         logger.info(
             "build_position | id=%-20s mkt=%s entry=%.4f TP=%.4f SL=%.4f "
@@ -326,25 +335,27 @@ class RiskManager:
 
     # ── Record a closed position ───────────────────────────────────────────────
 
-    def record_exit(self, pos: Position, exit_price: float) -> float:
+    async def record_exit(self, pos: Position, exit_price: float) -> float:
         """
         Call after a position closes (any ExitReason except HOLD).
         Updates bankroll, daily PnL, and releases market exposure.
         Returns realized PnL (negative = loss).
         """
         pnl = pos.pnl_at(exit_price)
-        self._daily_pnl  += pnl
-        self.bankroll    += pnl
 
-        released = pos.entry_price * pos.size_shares
-        self._market_exposure[pos.market_id] = max(
-            0.0,
-            self._market_exposure.get(pos.market_id, 0.0) - released,
-        )
-        self._trader_exposure[pos.trader_address] = max(
-            0.0,
-            self._trader_exposure.get(pos.trader_address, 0.0) - released,
-        )
+        async with self._exposure_lock:
+            self._daily_pnl  += pnl
+            self.bankroll    += pnl
+
+            released = pos.entry_price * pos.size_shares
+            self._market_exposure[pos.market_id] = max(
+                0.0,
+                self._market_exposure.get(pos.market_id, 0.0) - released,
+            )
+            self._trader_exposure[pos.trader_address] = max(
+                0.0,
+                self._trader_exposure.get(pos.trader_address, 0.0) - released,
+            )
 
         self._update_cooldown(pnl)
 
@@ -402,7 +413,7 @@ class RiskManager:
         """Current $ allocated in a given market."""
         return self._market_exposure.get(market_id, 0.0)
 
-    def release_exposure(
+    async def release_exposure(
         self, market_id: str, value: float, trader_address: Optional[str] = None
     ) -> None:
         """Release exposure registered by build_position() for a position that was
@@ -412,13 +423,14 @@ class RiskManager:
         Pass ``trader_address`` to also release the per-trader allocation that
         build_position() reserved; otherwise it would leak and slowly choke off
         future copies from that trader."""
-        self._market_exposure[market_id] = max(
-            0.0, self._market_exposure.get(market_id, 0.0) - value
-        )
-        if trader_address is not None:
-            self._trader_exposure[trader_address] = max(
-                0.0, self._trader_exposure.get(trader_address, 0.0) - value
+        async with self._exposure_lock:
+            self._market_exposure[market_id] = max(
+                0.0, self._market_exposure.get(market_id, 0.0) - value
             )
+            if trader_address is not None:
+                self._trader_exposure[trader_address] = max(
+                    0.0, self._trader_exposure.get(trader_address, 0.0) - value
+                )
 
     def market_exposure_cap(self) -> float:
         """Current cap in $ terms (changes as bankroll changes)."""

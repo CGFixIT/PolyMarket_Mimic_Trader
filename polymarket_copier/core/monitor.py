@@ -166,6 +166,7 @@ class TradeMonitor:
 
         # Token IDs currently subscribed in the WebSocket
         self._subscribed_tokens: Set[str] = set()
+        self._last_subscribed: set = set()
         # Snapshot of what was last sent in a subscription message.
         # _maybe_update_subscription diffs against this to avoid redundant sends.
         self._last_subscribed: Set[str] = set()

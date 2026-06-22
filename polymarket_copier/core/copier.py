@@ -189,7 +189,7 @@ class CopyTrader:
 
         # 9. build_position registers market exposure and enforces the exposure cap.
         try:
-            pos = self.risk.build_position(
+            pos = await self.risk.build_position(
                 position_id=str(uuid.uuid4()),
                 market_id=event.market_id,
                 token_id=event.token_id,
@@ -216,13 +216,13 @@ class CopyTrader:
             order_result = await self.clob.place_order(order)
         except InsufficientLiquidityError as e:
             logger.info("Skip: insufficient liquidity — %s", e)
-            self.risk.release_exposure(
+            await self.risk.release_exposure(
                 pos.market_id, pos.entry_price * pos.size_shares, pos.trader_address
             )
             return
         except Exception as e:
             logger.error("Order placement failed: %s", e)
-            self.risk.release_exposure(
+            await self.risk.release_exposure(
                 pos.market_id, pos.entry_price * pos.size_shares, pos.trader_address
             )
             return
@@ -411,7 +411,7 @@ class CopyTrader:
             return
 
         pnl = await self.portfolio.close_position(pos.position_id, price, reason)
-        self.risk.record_exit(pos, price)
+        await self.risk.record_exit(pos, price)
 
         if self.monitor:
             self.monitor.unsubscribe_token(pos.token_id)
