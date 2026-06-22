@@ -72,19 +72,25 @@ class ClobClient:
     def _check_liquidity(self, book: dict, price: float, size_usdc: float) -> None:
         """Ensure the ASK side has enough resting depth to fill a BUY without walking
         the book more than 1% above the order price. A market BUY lifts asks, so the
-        ask side — not the bid side — is what determines fillability."""
-        asks = book.get("asks", [])
-        available = 0.0
-        max_price = price * 1.01
+        ask side — not the bid side — is what determines fillability.
+
+        We compare available SHARES (not notional) against the shares we need to buy.
+        Comparing notional was a bug: it would reject valid orders whose ask-side
+        notional happened to be less than size_usdc despite having ample share depth.
+        """
+        asks          = book.get("asks", [])
+        max_price     = price * 1.01
+        needed_shares = size_usdc / max(price, 1e-6)
+        avail_shares  = 0.0
         for level in asks:
             level_price = float(level.get("price", 0))
-            level_size = float(level.get("size", 0))
+            level_size  = float(level.get("size", 0))
             if level_price <= max_price:
-                available += level_price * level_size
-        if available < size_usdc:
+                avail_shares += level_size
+        if avail_shares < needed_shares:
             raise InsufficientLiquidityError(
-                f"Insufficient liquidity: need ${size_usdc:.2f}, "
-                f"available ${available:.2f} on the ask side within 1% of ${price:.4f}"
+                f"Insufficient liquidity: need {needed_shares:.2f} shares, "
+                f"available {avail_shares:.2f} shares on ask side within 1% of ${price:.4f}"
             )
 
     async def place_order(self, order: Order) -> dict[str, Any]:
