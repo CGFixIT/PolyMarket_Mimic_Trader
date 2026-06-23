@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from datetime import datetime, timezone
 from typing import Any, Optional
@@ -16,6 +17,13 @@ GAMMA_API_BASE = "https://gamma-api.polymarket.com"
 # Price-by-token-id is a CLOB concept, not a Gamma one — see get_market_price.
 CLOB_API_BASE = "https://clob.polymarket.com"
 
+# Connection pool sizing. The Gamma/CLOB clients sit on the hot detection→copy
+# path (get_market + get_market_price fire concurrently per trade event, plus a
+# per-tick midpoint poll), so reusing keep-alive connections avoids a fresh TLS
+# handshake on every call — material latency when running on a local server.
+_CONN_LIMIT = 20
+_KEEPALIVE_TIMEOUT = 30
+
 
 class GammaClient:
     """Wraps the Polymarket Gamma API for market and event discovery."""
@@ -24,12 +32,25 @@ class GammaClient:
         self.base_url = base_url.rstrip("/")
         self._external_session = session is not None
         self._session = session
+        # Guards lazy session creation. Without it, two coroutines launched via
+        # asyncio.gather (copier fires get_market + get_market_price together)
+        # can both observe `_session is None` and each build a ClientSession —
+        # one is orphaned and never closed ("Unclosed client session" + fd leak).
+        self._session_lock = asyncio.Lock()
 
     async def _get_session(self) -> aiohttp.ClientSession:
-        if self._session is None or self._session.closed:
-            self._session = aiohttp.ClientSession(
-                timeout=aiohttp.ClientTimeout(total=10),
-            )
+        # Fast path: an open session already exists, no lock needed.
+        if self._session is not None and not self._session.closed:
+            return self._session
+        async with self._session_lock:
+            # Re-check inside the lock — a racing caller may have just built it.
+            if self._session is None or self._session.closed:
+                self._session = aiohttp.ClientSession(
+                    timeout=aiohttp.ClientTimeout(total=10),
+                    connector=aiohttp.TCPConnector(
+                        limit=_CONN_LIMIT, keepalive_timeout=_KEEPALIVE_TIMEOUT
+                    ),
+                )
         return self._session
 
     async def close(self) -> None:
@@ -76,7 +97,13 @@ class GammaClient:
                 resp.raise_for_status()
                 data = await resp.json()
             if isinstance(data, dict):
-                raw = data.get("mid") or data.get("midpoint") or data.get("price")
+                # Use explicit None checks, not `a or b`: a legitimate midpoint of
+                # 0.0 is falsy and would otherwise be skipped for the next key.
+                raw = data.get("mid")
+                if raw is None:
+                    raw = data.get("midpoint")
+                if raw is None:
+                    raw = data.get("price")
                 if raw is not None:
                     price = float(raw)
                     if not (0.0 <= price <= 1.0):

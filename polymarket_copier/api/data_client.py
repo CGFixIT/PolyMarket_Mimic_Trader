@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from typing import Any, Optional
 
@@ -12,6 +13,11 @@ logger = logging.getLogger("polymarket_copier")
 
 DATA_API_BASE = "https://data-api.polymarket.com"
 
+# Reuse keep-alive connections across the steady stream of leaderboard/activity
+# polls instead of re-handshaking TLS on every request.
+_CONN_LIMIT = 20
+_KEEPALIVE_TIMEOUT = 30
+
 
 class DataClient:
     """Wraps the Polymarket Data API for leaderboard, trades, and activity data."""
@@ -21,12 +27,23 @@ class DataClient:
         self._external_session = session is not None
         self._session = session
         self._limiter = AsyncLimiter(30, 60)  # 30 requests per 60 seconds
+        # Guards lazy session creation against concurrent first-callers (see
+        # GammaClient for the orphaned-session race this prevents).
+        self._session_lock = asyncio.Lock()
 
     async def _get_session(self) -> aiohttp.ClientSession:
-        if self._session is None or self._session.closed:
-            self._session = aiohttp.ClientSession(
-                timeout=aiohttp.ClientTimeout(total=10),
-            )
+        # Fast path: an open session already exists, no lock needed.
+        if self._session is not None and not self._session.closed:
+            return self._session
+        async with self._session_lock:
+            # Re-check inside the lock — a racing caller may have just built it.
+            if self._session is None or self._session.closed:
+                self._session = aiohttp.ClientSession(
+                    timeout=aiohttp.ClientTimeout(total=10),
+                    connector=aiohttp.TCPConnector(
+                        limit=_CONN_LIMIT, keepalive_timeout=_KEEPALIVE_TIMEOUT
+                    ),
+                )
         return self._session
 
     async def close(self) -> None:
