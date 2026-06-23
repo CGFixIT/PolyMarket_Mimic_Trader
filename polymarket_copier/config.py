@@ -59,6 +59,13 @@ class CopyTradingConfig(BaseModel):
     kelly_enabled: bool = False
     kelly_fraction_multiplier: float = 0.25
     kelly_min_trades: int = 20
+    # When True (default), Kelly sizing can use the tracker's observed win rate as
+    # a prior while our own closed-trade sample is smaller than kelly_min_trades.
+    # The tracker's win rate comes from the live leaderboard and is not shaped by
+    # our TP/SL rules, so it is a less biased estimate than the portfolio win rate
+    # during the early warm-up period. Disabled automatically when the bot's own
+    # sample reaches kelly_min_trades (the portfolio rate then takes over).
+    kelly_seed_from_tracker: bool = True
 
 
 class RiskManagementConfig(BaseModel):

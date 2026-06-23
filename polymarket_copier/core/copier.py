@@ -42,6 +42,19 @@ class CopyTrader:
         # asyncio.gather can both read count=N < max before either writes,
         # opening one extra position and breaching the cap (TOCTOU race).
         self._entry_lock = asyncio.Lock()
+        # Tracker-observed win rates per wallet address, refreshed by main.py after
+        # each TrackerClient.refresh(). Used as a Kelly prior when our own closed-
+        # trade sample is too small to trust (kelly_seed_from_tracker=True).
+        self._tracker_win_rates: dict[str, float] = {}
+
+    def update_tracker_win_rates(self, rates: dict[str, float]) -> None:
+        """Replace the current tracker-win-rate prior with freshly scored data.
+
+        Called by main.py after each TrackerClient.refresh() so Kelly sizing
+        always uses the most recent leaderboard win rates as a prior during
+        the warm-up period before the bot's own sample is large enough.
+        """
+        self._tracker_win_rates = dict(rates)
 
     async def handle_trade_event(self, event: TradeEvent) -> None:
         """Called by TradeMonitor on every new detected trade."""
@@ -161,6 +174,23 @@ class CopyTrader:
                     self.risk.bankroll,
                     ct.kelly_fraction_multiplier,
                     ct.max_trade_pct,
+                )
+            elif ct.kelly_seed_from_tracker and event.wallet_address in self._tracker_win_rates:
+                # Our own closed-trade sample is too small to trust (self-reference
+                # bias: portfolio win rate is shaped by our TP/SL rules, not the
+                # trader's true edge). Fall back to the tracker's leaderboard win
+                # rate as a less-biased prior during warm-up.
+                tracker_win_rate = self._tracker_win_rates[event.wallet_address]
+                copy_size_usdc = kelly_size_usdc(
+                    tracker_win_rate,
+                    current_price,
+                    self.risk.bankroll,
+                    ct.kelly_fraction_multiplier,
+                    ct.max_trade_pct,
+                )
+                logger.debug(
+                    "Kelly: seeded win_rate=%.3f from tracker (own sample=%d < %d)",
+                    tracker_win_rate, sample, ct.kelly_min_trades,
                 )
 
         # Hard ceiling regardless of sizing path.

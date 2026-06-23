@@ -483,6 +483,84 @@ class TestFillReconciliation:
         assert positions[0].size_shares == pytest.approx(75.0)
 
 
+# ─── Kelly tracker-prior seeding ─────────────────────────────────────────────
+
+class TestKellyTrackerPrior:
+    """Kelly sizing uses tracker leaderboard win rate as a warm-up prior when
+    the bot's own closed-trade sample is too small to trust."""
+
+    @pytest.mark.asyncio
+    async def test_tracker_prior_used_when_sample_too_small(self, copier):
+        """With sample < min_trades and a tracker rate, Kelly uses the tracker rate."""
+        copier.config.copy_trading.kelly_enabled = True
+        copier.config.copy_trading.kelly_min_trades = 20
+        copier.config.copy_trading.kelly_seed_from_tracker = True
+        copier.config.copy_trading.kelly_fraction_multiplier = 0.25
+        copier.config.copy_trading.max_trade_pct = 0.02
+        # 5 closed trades (<20 min), but tracker shows a 70% win rate.
+        await _seed_closed_trades(copier.portfolio, "0xwhale", wins=5, losses=0)
+        copier.update_tracker_win_rates({"0xwhale": 0.70})
+
+        await copier.handle_trade_event(buy_event(price=0.50, size=100.0, token="tok-a"))
+        open_pos = await copier.portfolio.get_open_positions()
+        assert len(open_pos) == 1
+        # Kelly with tracker win_rate=0.70: f*=0.40, raw=$1000, cap=2%*10k=$200 → 400 shares.
+        # Flat sizing would give 100 shares — confirms tracker rate was used.
+        assert open_pos[0].size_shares == pytest.approx(400.0)
+
+    @pytest.mark.asyncio
+    async def test_flat_fallback_when_seeding_disabled(self, copier):
+        """kelly_seed_from_tracker=False → flat formula even when a tracker rate exists."""
+        copier.config.copy_trading.kelly_enabled = True
+        copier.config.copy_trading.kelly_min_trades = 20
+        copier.config.copy_trading.kelly_seed_from_tracker = False
+        copier.update_tracker_win_rates({"0xwhale": 0.70})
+
+        await copier.handle_trade_event(buy_event(price=0.50, size=100.0, token="tok-a"))
+        open_pos = await copier.portfolio.get_open_positions()
+        assert len(open_pos) == 1
+        # Flat: 0.5 * $100 = $50 → 100 shares @ 0.50.
+        assert open_pos[0].size_shares == pytest.approx(100.0)
+
+    @pytest.mark.asyncio
+    async def test_flat_fallback_when_wallet_not_in_tracker(self, copier):
+        """Seeding enabled but no tracker rate for this wallet → flat formula."""
+        copier.config.copy_trading.kelly_enabled = True
+        copier.config.copy_trading.kelly_min_trades = 20
+        copier.config.copy_trading.kelly_seed_from_tracker = True
+        # Tracker rates for a *different* wallet only.
+        copier.update_tracker_win_rates({"0xother": 0.70})
+
+        await copier.handle_trade_event(buy_event(price=0.50, size=100.0, token="tok-a"))
+        open_pos = await copier.portfolio.get_open_positions()
+        assert len(open_pos) == 1
+        assert open_pos[0].size_shares == pytest.approx(100.0)
+
+    @pytest.mark.asyncio
+    async def test_own_sample_takes_over_once_sufficient(self, copier):
+        """When bot's own sample >= min_trades, own rate wins over tracker prior."""
+        copier.config.copy_trading.kelly_enabled = True
+        copier.config.copy_trading.kelly_min_trades = 20
+        copier.config.copy_trading.kelly_seed_from_tracker = True
+        copier.config.copy_trading.kelly_fraction_multiplier = 0.25
+        copier.config.copy_trading.max_trade_pct = 0.02
+        # Bot's own: 50 wins / 50 losses → win_rate=0.50=price → no edge → size=0.
+        # Tracker rate=0.70 → Kelly $200 (400 shares), but own sample wins.
+        await _seed_closed_trades(copier.portfolio, "0xwhale", wins=50, losses=50)
+        copier.update_tracker_win_rates({"0xwhale": 0.70})
+
+        await copier.handle_trade_event(buy_event(price=0.50, size=100.0, token="tok-a"))
+        # Own win_rate=0.50 == price → f*=0 → no position opened.
+        assert await copier.portfolio.position_count() == 0
+
+    def test_update_tracker_win_rates_replaces_prior_mapping(self, copier):
+        """update_tracker_win_rates() fully replaces the previous dict (not merges)."""
+        copier.update_tracker_win_rates({"0xold": 0.60})
+        copier.update_tracker_win_rates({"0xnew": 0.75})
+        assert "0xold" not in copier._tracker_win_rates
+        assert copier._tracker_win_rates == {"0xnew": 0.75}
+
+
 # ─── Latency logging ─────────────────────────────────────────────────────────
 
 class TestLatencyLogging:

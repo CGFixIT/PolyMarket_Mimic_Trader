@@ -86,6 +86,9 @@ async def run_bot(config_path: Optional[str] = None, mode: Optional[str] = None)
     logger.info("Tracking %d wallets", len(wallets))
 
     copier = CopyTrader(risk_manager, portfolio, clob_client, gamma_client, config)
+    copier.update_tracker_win_rates(
+        {t.stats.address: t.stats.win_rate for t in top_traders}
+    )
 
     monitor = TradeMonitor(
         tracked_wallets=wallets,
@@ -112,6 +115,9 @@ async def run_bot(config_path: Optional[str] = None, mode: Optional[str] = None)
                 new_traders = await tracker.refresh()
                 if new_traders:
                     monitor._wallets = [t.stats.address for t in new_traders]
+                    copier.update_tracker_win_rates(
+                        {t.stats.address: t.stats.win_rate for t in new_traders}
+                    )
                     logger.info("Rebalanced: now tracking %d wallets", len(monitor._wallets))
 
     async def exit_check_loop() -> None:
