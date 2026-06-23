@@ -501,3 +501,39 @@ class TestLatencyLogging:
             await copier.handle_trade_event(buy_event())
         latency_logged = any("decision_latency" in r.message for r in caplog.records)
         assert latency_logged, "decision_latency was not logged after order placement"
+
+
+# ─── Entry-path TOCTOU lock ───────────────────────────────────────────────────
+
+class TestEntryTocTouLock:
+    """Concurrent wallet polls must not both pass the position-count gate and
+    both open positions when max_concurrent_positions == 1."""
+
+    @pytest.mark.asyncio
+    async def test_concurrent_buys_respect_max_positions(self, copier):
+        """Two simultaneous handle_trade_event calls for different markets must
+        not both open when max_concurrent_positions == 1."""
+        import asyncio
+        copier.config.copy_trading.max_concurrent_positions = 1
+
+        event_a = buy_event(market="mkt-a", token="tok-a", wallet="0xwhale")
+        event_b = buy_event(market="mkt-b", token="tok-b", wallet="0xother")
+
+        # Run both concurrently — the _entry_lock ensures only one wins.
+        await asyncio.gather(
+            copier.handle_trade_event(event_a),
+            copier.handle_trade_event(event_b),
+        )
+
+        count = await copier.portfolio.position_count()
+        assert count == 1, f"Expected exactly 1 position, got {count} (TOCTOU race)"
+
+    @pytest.mark.asyncio
+    async def test_serial_buys_still_open_up_to_cap(self, copier):
+        """Serial calls (no concurrency) should still accumulate up to the cap."""
+        copier.config.copy_trading.max_concurrent_positions = 2
+        await copier.handle_trade_event(buy_event(market="mkt-a", token="tok-a"))
+        await copier.handle_trade_event(buy_event(market="mkt-b", token="tok-b"))
+        await copier.handle_trade_event(buy_event(market="mkt-c", token="tok-c"))
+        count = await copier.portfolio.position_count()
+        assert count == 2, "Should be capped at 2 even with serial calls"

@@ -37,6 +37,11 @@ class CopyTrader:
         self.gamma = gamma_client
         self.config = config
         self.monitor = monitor
+        # Serialises the critical section from position-count check through
+        # open_position() write. Without this, concurrent wallet polls via
+        # asyncio.gather can both read count=N < max before either writes,
+        # opening one extra position and breaching the cap (TOCTOU race).
+        self._entry_lock = asyncio.Lock()
 
     async def handle_trade_event(self, event: TradeEvent) -> None:
         """Called by TradeMonitor on every new detected trade."""
@@ -170,126 +175,133 @@ class CopyTrader:
         if market and market.resolve_time:
             resolve_ts = market.resolve_time.timestamp()
 
-        # 7. Cheap gating checks FIRST — before registering exposure, so that a
-        #    rejection here can never leak phantom exposure into the RiskManager.
-        count = await self.portfolio.position_count()
-        if count >= self.config.copy_trading.max_concurrent_positions:
-            logger.info("Skip: max positions (%d) reached", count)
-            return
+        # 7–10. The position-count check (7) and open_position() write (10) must be
+        #        atomic. Without a lock, concurrent wallet polls via asyncio.gather
+        #        both read count=N < max before either writes, opening one extra
+        #        position beyond the cap (TOCTOU). The lock also covers the order
+        #        placement I/O — acceptable here because we copy at most 5 wallets
+        #        and concurrent entry events are rare and brief.
+        async with self._entry_lock:
+            # 7. Cheap gating checks FIRST — before registering exposure, so that a
+            #    rejection here can never leak phantom exposure into the RiskManager.
+            count = await self.portfolio.position_count()
+            if count >= self.config.copy_trading.max_concurrent_positions:
+                logger.info("Skip: max positions (%d) reached", count)
+                return
 
-        # 8. Per-trader drawdown stop.
-        trader_pnl = await self.portfolio.get_trader_pnl(event.wallet_address)
-        if trader_pnl <= -(self.risk.bankroll * self.config.risk_management.drawdown_stop_pct):
-            logger.info(
-                "Skip: trader %s drawdown stop (pnl=$%.2f)",
-                event.wallet_address[:10], trader_pnl,
-            )
-            return
+            # 8. Per-trader drawdown stop.
+            trader_pnl = await self.portfolio.get_trader_pnl(event.wallet_address)
+            if trader_pnl <= -(self.risk.bankroll * self.config.risk_management.drawdown_stop_pct):
+                logger.info(
+                    "Skip: trader %s drawdown stop (pnl=$%.2f)",
+                    event.wallet_address[:10], trader_pnl,
+                )
+                return
 
-        # 9. build_position registers market exposure and enforces the exposure cap.
-        try:
-            pos = await self.risk.build_position(
-                position_id=str(uuid.uuid4()),
+            # 9. build_position registers market exposure and enforces the exposure cap.
+            try:
+                pos = await self.risk.build_position(
+                    position_id=str(uuid.uuid4()),
+                    market_id=event.market_id,
+                    token_id=event.token_id,
+                    trader_address=event.wallet_address,
+                    entry_price=current_price,
+                    size_shares=size_shares,
+                    resolve_time=resolve_ts,
+                )
+            except ExposureCapError as e:
+                logger.info("Skip: exposure cap — %s", e)
+                return
+
+            order = Order(
                 market_id=event.market_id,
                 token_id=event.token_id,
-                trader_address=event.wallet_address,
-                entry_price=current_price,
-                size_shares=size_shares,
-                resolve_time=resolve_ts,
+                side="BUY",
+                price=current_price,
+                size_usdc=copy_size_usdc,
             )
-        except ExposureCapError as e:
-            logger.info("Skip: exposure cap — %s", e)
-            return
 
-        order = Order(
-            market_id=event.market_id,
-            token_id=event.token_id,
-            side="BUY",
-            price=current_price,
-            size_usdc=copy_size_usdc,
-        )
+            # 10. Place order. On ANY failure, release the exposure build_position
+            #     registered so a never-opened position cannot leak the exposure cap.
+            try:
+                order_result = await self.clob.place_order(order)
+            except InsufficientLiquidityError as e:
+                logger.info("Skip: insufficient liquidity — %s", e)
+                await self.risk.release_exposure(
+                    pos.market_id, pos.entry_price * pos.size_shares, pos.trader_address
+                )
+                return
+            except Exception as e:
+                logger.error("Order placement failed: %s", e)
+                await self.risk.release_exposure(
+                    pos.market_id, pos.entry_price * pos.size_shares, pos.trader_address
+                )
+                return
 
-        # 10. Place order. On ANY failure, release the exposure build_position
-        #     registered so a never-opened position cannot leak the exposure cap.
-        try:
-            order_result = await self.clob.place_order(order)
-        except InsufficientLiquidityError as e:
-            logger.info("Skip: insufficient liquidity — %s", e)
-            await self.risk.release_exposure(
-                pos.market_id, pos.entry_price * pos.size_shares, pos.trader_address
+            # 10a. Reconcile against the ACTUAL fill. In live trading an order can
+            #      partially fill or not fill at all; assuming a full fill would
+            #      overstate pos.size_shares (corrupting PnL, TP/SL share counts) and
+            #      strand the unfilled exposure that build_position() reserved.
+            #      PAPER results report a full fill at fill_price, so this is a no-op
+            #      there and paper behaviour is preserved exactly.
+            filled_shares, avg_fill_price = self._reconcile_fill(
+                order_result, size_shares, current_price
             )
-            return
-        except Exception as e:
-            logger.error("Order placement failed: %s", e)
-            await self.risk.release_exposure(
-                pos.market_id, pos.entry_price * pos.size_shares, pos.trader_address
-            )
-            return
 
-        # 10a. Reconcile against the ACTUAL fill. In live trading an order can
-        #      partially fill or not fill at all; assuming a full fill would
-        #      overstate pos.size_shares (corrupting PnL, TP/SL share counts) and
-        #      strand the unfilled exposure that build_position() reserved.
-        #      PAPER results report a full fill at fill_price, so this is a no-op
-        #      there and paper behaviour is preserved exactly.
-        filled_shares, avg_fill_price = self._reconcile_fill(
-            order_result, size_shares, current_price
-        )
+            # Exposure accounting basis: build_position() registered
+            # `entry_price * size_shares` at the PRE-fill current_price into BOTH the
+            # market and trader buckets. We reconcile against THAT same notional so
+            # nothing leaks — releasing the unfilled fraction of the registered
+            # notional (not the fill-priced notional) keeps release + remaining ==
+            # registered exactly.
+            registered_notional = pos.entry_price * pos.size_shares  # == current_price * size_shares
 
-        # Exposure accounting basis: build_position() registered
-        # `entry_price * size_shares` at the PRE-fill current_price into BOTH the
-        # market and trader buckets. We reconcile against THAT same notional so
-        # nothing leaks — releasing the unfilled fraction of the registered
-        # notional (not the fill-priced notional) keeps release + remaining ==
-        # registered exactly.
-        registered_notional = pos.entry_price * pos.size_shares  # == current_price * size_shares
+            if filled_shares <= 0.0:
+                # No fill: release the FULL registered notional and abort without
+                # opening a position or subscribing the token.
+                await self.risk.release_exposure(
+                    pos.market_id, registered_notional, pos.trader_address
+                )
+                logger.info(
+                    "Skip: order did not fill (0 shares) — released $%.2f exposure on %s",
+                    registered_notional, event.market_id[:10],
+                )
+                return
 
-        if filled_shares <= 0.0:
-            # No fill: release the FULL registered notional and abort without
-            # opening a position or subscribing the token.
-            await self.risk.release_exposure(
-                pos.market_id, registered_notional, pos.trader_address
-            )
+            if filled_shares < size_shares:
+                # Partial fill: release the unfilled fraction of the REGISTERED
+                # notional so market+trader exposure reflect only the shares actually
+                # acquired. unfilled_fraction is computed against the original
+                # size_shares (the notional basis), so released + remaining ==
+                # registered_notional.
+                unfilled_fraction = (size_shares - filled_shares) / size_shares
+                release_value = registered_notional * unfilled_fraction
+                await self.risk.release_exposure(
+                    pos.market_id, release_value, pos.trader_address
+                )
+                pos.size_shares = filled_shares
+                logger.info(
+                    "Partial fill: %.2f/%.2f shares — released $%.2f unfilled exposure on %s",
+                    filled_shares, size_shares, release_value, event.market_id[:10],
+                )
+
+            # Set entry/peak to the actual average fill price. In PAPER mode this is
+            # the slippage/fee-adjusted fill_price (full fill), preserving the prior
+            # behaviour exactly; in LIVE it is the real execution price. This subsumes
+            # the old `fill_price != pos.entry_price` adjustment — applied exactly
+            # once here, never doubled.
+            fill_price = avg_fill_price
+            if fill_price != pos.entry_price:
+                pos.entry_price = fill_price
+                pos.peak_price  = fill_price
+
+            decision_latency = time.monotonic() - decision_start
             logger.info(
-                "Skip: order did not fill (0 shares) — released $%.2f exposure on %s",
-                registered_notional, event.market_id[:10],
-            )
-            return
-
-        if filled_shares < size_shares:
-            # Partial fill: release the unfilled fraction of the REGISTERED
-            # notional so market+trader exposure reflect only the shares actually
-            # acquired. unfilled_fraction is computed against the original
-            # size_shares (the notional basis), so released + remaining ==
-            # registered_notional.
-            unfilled_fraction = (size_shares - filled_shares) / size_shares
-            release_value = registered_notional * unfilled_fraction
-            await self.risk.release_exposure(
-                pos.market_id, release_value, pos.trader_address
-            )
-            pos.size_shares = filled_shares
-            logger.info(
-                "Partial fill: %.2f/%.2f shares — released $%.2f unfilled exposure on %s",
-                filled_shares, size_shares, release_value, event.market_id[:10],
+                "Latency | wall_age=%.2fs detect_latency=%.3fs decision_latency=%.3fs",
+                wall_age, detection_latency, decision_latency,
             )
 
-        # Set entry/peak to the actual average fill price. In PAPER mode this is
-        # the slippage/fee-adjusted fill_price (full fill), preserving the prior
-        # behaviour exactly; in LIVE it is the real execution price. This subsumes
-        # the old `fill_price != pos.entry_price` adjustment — applied exactly
-        # once here, never doubled.
-        fill_price = avg_fill_price
-        if fill_price != pos.entry_price:
-            pos.entry_price = fill_price
-            pos.peak_price  = fill_price
-
-        decision_latency = time.monotonic() - decision_start
-        logger.info(
-            "Latency | wall_age=%.2fs detect_latency=%.3fs decision_latency=%.3fs",
-            wall_age, detection_latency, decision_latency,
-        )
-
-        await self.portfolio.open_position(pos)
+            await self.portfolio.open_position(pos)
 
         if self.monitor:
             self.monitor.subscribe_token(event.token_id)
