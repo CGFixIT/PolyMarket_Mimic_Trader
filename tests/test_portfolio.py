@@ -196,3 +196,61 @@ class TestUninitializedGuard:
         pm = PortfolioManager(db_path="unused.db")
         with pytest.raises(RuntimeError, match="not initialized"):
             await pm.get_open_positions()
+
+
+class TestRealizedPnlLedger:
+    """The tax-lot ledger written on close_position() and its reporting."""
+
+    @pytest.mark.asyncio
+    async def test_close_records_realized_lot(self, portfolio, rm):
+        pos = make_position(rm, entry=0.50, size=100.0)  # cost basis $50
+        await portfolio.open_position(pos)
+        pnl = await portfolio.close_position(pos.position_id, 0.65, ExitReason.TAKE_PROFIT)
+        # (0.65 - 0.50) * 100 = $15 realized
+        assert pnl == pytest.approx(15.0)
+
+        report = await portfolio.realized_pnl_report()
+        assert report["disposals"] == 1
+        assert report["proceeds"] == pytest.approx(65.0)       # 0.65 * 100
+        assert report["cost_basis"] == pytest.approx(50.0)     # 0.50 * 100
+        assert report["net_realized_pnl"] == pytest.approx(15.0)
+        # A just-opened position is short-term.
+        assert report["short_term_pnl"] == pytest.approx(15.0)
+        assert report["long_term_pnl"] == pytest.approx(0.0)
+
+    @pytest.mark.asyncio
+    async def test_report_aggregates_multiple_disposals(self, portfolio, rm):
+        win = make_position(rm, entry=0.40, market_id="mkt-w", size=100.0)
+        loss = make_position(rm, entry=0.60, market_id="mkt-l", size=100.0)
+        await portfolio.open_position(win)
+        await portfolio.open_position(loss)
+        await portfolio.close_position(win.position_id, 0.55, ExitReason.TAKE_PROFIT)   # +15
+        await portfolio.close_position(loss.position_id, 0.50, ExitReason.STOP_LOSS)    # -10
+
+        report = await portfolio.realized_pnl_report()
+        assert report["disposals"] == 2
+        assert report["net_realized_pnl"] == pytest.approx(5.0)
+
+    @pytest.mark.asyncio
+    async def test_long_term_lot_classified(self, portfolio, rm):
+        pos = make_position(rm, entry=0.50, size=100.0)
+        pos.entry_time = pos.entry_time - 400 * 86_400  # held > 1 year
+        await portfolio.open_position(pos)
+        await portfolio.close_position(pos.position_id, 0.60, ExitReason.TAKE_PROFIT)
+
+        report = await portfolio.realized_pnl_report()
+        assert report["long_term_pnl"] == pytest.approx(10.0)
+        assert report["short_term_pnl"] == pytest.approx(0.0)
+
+    @pytest.mark.asyncio
+    async def test_report_filters_by_year(self, portfolio, rm):
+        from datetime import datetime, timezone
+
+        pos = make_position(rm, entry=0.50, size=100.0)
+        await portfolio.open_position(pos)
+        await portfolio.close_position(pos.position_id, 0.60, ExitReason.TAKE_PROFIT)
+
+        this_year = datetime.now(timezone.utc).year
+        assert (await portfolio.realized_pnl_report(year=this_year))["disposals"] == 1
+        # A year with no disposals is empty, not an error.
+        assert (await portfolio.realized_pnl_report(year=this_year - 5))["disposals"] == 0

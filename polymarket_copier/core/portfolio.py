@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 import os
 import time
+from datetime import datetime, timezone
 from typing import List, Optional
 
 import aiosqlite
@@ -12,6 +13,11 @@ import aiosqlite
 from polymarket_copier.core.risk_manager import ExitReason, Position, Side
 
 logger = logging.getLogger("polymarket_copier")
+
+# US long-term capital-gains threshold: assets held > 1 year. Prediction-market
+# positions are almost always short-term, but tracking the split is the whole
+# point of a tax-lot ledger, so the boundary is recorded per disposal.
+_LONG_TERM_HOLDING_SECONDS = 365 * 86_400
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS positions (
@@ -32,6 +38,27 @@ CREATE TABLE IF NOT EXISTS positions (
     realized_pnl    REAL,
     closed_at       REAL
 );
+
+-- Realized-PnL tax-lot ledger. One immutable row per disposal (position close),
+-- capturing cost basis, proceeds, holding period and short/long-term character.
+-- This is the foundation for year-end realized-gain reporting; the positions
+-- table alone only keeps the latest realized_pnl and can't be aggregated by
+-- tax year or holding term.
+CREATE TABLE IF NOT EXISTS realized_lots (
+    lot_id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    position_id     TEXT NOT NULL,
+    token_id        TEXT NOT NULL,
+    trader_address  TEXT NOT NULL,
+    shares          REAL NOT NULL,
+    cost_basis      REAL NOT NULL,   -- USDC paid to acquire (entry_price * shares)
+    proceeds        REAL NOT NULL,   -- USDC received on disposal (exit_price * shares)
+    realized_pnl    REAL NOT NULL,   -- proceeds - cost_basis
+    acquired_at     REAL NOT NULL,   -- position entry_time (Unix)
+    disposed_at     REAL NOT NULL,   -- close time (Unix)
+    holding_seconds REAL NOT NULL,
+    term            TEXT NOT NULL     -- 'short' or 'long'
+);
+CREATE INDEX IF NOT EXISTS idx_realized_lots_disposed ON realized_lots (disposed_at);
 """
 
 
@@ -91,14 +118,68 @@ class PortfolioManager:
             logger.warning("Position %s not found for closing", position_id)
             return 0.0
         pnl = pos.pnl_at(exit_price)
+        closed_at = time.time()
         await db.execute(
             """UPDATE positions SET status='closed', exit_price=?, exit_reason=?,
                realized_pnl=?, closed_at=? WHERE position_id=?""",
-            (exit_price, reason.name, pnl, time.time(), position_id),
+            (exit_price, reason.name, pnl, closed_at, position_id),
+        )
+        # Record an immutable tax lot in the SAME transaction as the close, so the
+        # ledger can never drift from the positions table.
+        cost_basis = pos.entry_price * pos.size_shares
+        proceeds = exit_price * pos.size_shares
+        holding_seconds = max(0.0, closed_at - pos.entry_time)
+        term = "long" if holding_seconds > _LONG_TERM_HOLDING_SECONDS else "short"
+        await db.execute(
+            """INSERT INTO realized_lots
+               (position_id, token_id, trader_address, shares, cost_basis,
+                proceeds, realized_pnl, acquired_at, disposed_at,
+                holding_seconds, term)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (position_id, pos.token_id, pos.trader_address, pos.size_shares,
+             cost_basis, proceeds, pnl, pos.entry_time, closed_at,
+             holding_seconds, term),
         )
         await db.commit()
         logger.info("Position closed: %s reason=%s pnl=%.4f", position_id, reason.name, pnl)
         return pnl
+
+    async def realized_pnl_report(self, year: Optional[int] = None) -> dict:
+        """Aggregate the realized-lot ledger into a tax-style summary.
+
+        Pass ``year`` (UTC) to scope to a single tax year by disposal date;
+        omit it for an all-time report. Returns total proceeds, cost basis,
+        net realized PnL, the short/long-term split, and disposal count.
+        """
+        db = self._require_db()
+        where = ""
+        params: tuple = ()
+        if year is not None:
+            start = datetime(year, 1, 1, tzinfo=timezone.utc).timestamp()
+            end = datetime(year + 1, 1, 1, tzinfo=timezone.utc).timestamp()
+            where = "WHERE disposed_at >= ? AND disposed_at < ?"
+            params = (start, end)
+        cursor = await db.execute(
+            f"""SELECT
+                   COUNT(*),
+                   COALESCE(SUM(proceeds), 0),
+                   COALESCE(SUM(cost_basis), 0),
+                   COALESCE(SUM(realized_pnl), 0),
+                   COALESCE(SUM(CASE WHEN term='short' THEN realized_pnl ELSE 0 END), 0),
+                   COALESCE(SUM(CASE WHEN term='long'  THEN realized_pnl ELSE 0 END), 0)
+               FROM realized_lots {where}""",
+            params,
+        )
+        row = await cursor.fetchone()
+        return {
+            "year": year,
+            "disposals": int(row[0]) if row else 0,
+            "proceeds": float(row[1]) if row else 0.0,
+            "cost_basis": float(row[2]) if row else 0.0,
+            "net_realized_pnl": float(row[3]) if row else 0.0,
+            "short_term_pnl": float(row[4]) if row else 0.0,
+            "long_term_pnl": float(row[5]) if row else 0.0,
+        }
 
     async def get_open_positions(self) -> List[Position]:
         db = self._require_db()
