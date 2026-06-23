@@ -46,6 +46,11 @@ class CopyTradingConfig(BaseModel):
     # paper PnL reflects live execution costs rather than zero-cost fills.
     paper_fill_slippage_pct: float = 0.005   # ~0.5% half-spread
     paper_taker_fee_pct: float = 0.02         # Polymarket CLOB taker fee
+    # Live-mode slippage cap: reject a BUY if no ask depth exists within this
+    # fraction of the requested price. Prevents inadvertently paying far above
+    # the quoted price when the order book is thin or the market moves fast.
+    # Must match or exceed paper_fill_slippage_pct so live/paper parity holds.
+    max_live_slippage_pct: float = 0.01       # 1% max walk above order price
     # Edge-aware (fractional-Kelly) position sizing. OFF by default — opt-in, so
     # enabling it is the only thing that changes copy-size behaviour. When on,
     # sizing uses kelly_size_usdc() with the trader's observed win rate, but only

@@ -153,3 +153,43 @@ class TestPaperFillPrice:
         result = await client.place_order(buy_order(price=0.50))
         # fill = 0.50 * (1 + 0.01 + 0.03) = 0.52
         assert result["fill_price"] == pytest.approx(0.52)
+
+
+# ─── Live slippage cap (configurable) ────────────────────────────────────────
+
+class TestLiveSlippageCap:
+    """max_live_slippage_pct replaces the formerly hardcoded 1% band in
+    _check_liquidity, allowing operators to tighten or widen the acceptable
+    fill-price band without changing code."""
+
+    def test_default_cap_is_1pct(self, paper_client):
+        """Default max_live_slippage_pct=0.01 → same behaviour as the old 1% hardcode."""
+        book = {"asks": [
+            {"price": "0.505", "size": "500"},  # 1% above $0.50 → exactly at cap
+        ]}
+        # Should not raise: ask is within 1% of 0.50, enough depth.
+        paper_client._check_liquidity(book, price=0.50, size_usdc=100.0)
+
+    def test_wider_cap_admits_far_asks(self, paper_client):
+        """Widening the cap to 5% allows asks up to 0.525 to count as fillable."""
+        paper_client.config.copy_trading.max_live_slippage_pct = 0.05
+        book = {"asks": [
+            {"price": "0.52", "size": "500"},  # 4% above 0.50 — excluded at 1%, ok at 5%
+        ]}
+        paper_client._check_liquidity(book, price=0.50, size_usdc=100.0)
+
+    def test_tighter_cap_excludes_borderline_asks(self, paper_client):
+        """Tightening the cap to 0% means even a 0.001 tick above price is excluded."""
+        paper_client.config.copy_trading.max_live_slippage_pct = 0.0
+        book = {"asks": [
+            {"price": "0.501", "size": "10000"},  # just above → excluded with 0% cap
+        ]}
+        with pytest.raises(InsufficientLiquidityError, match="0.0%"):
+            paper_client._check_liquidity(book, price=0.50, size_usdc=100.0)
+
+    def test_error_message_includes_configured_pct(self, paper_client):
+        """InsufficientLiquidityError message must show the configured cap, not '1%'."""
+        paper_client.config.copy_trading.max_live_slippage_pct = 0.03
+        book = {"asks": [{"price": "0.50", "size": "1"}]}  # thin book
+        with pytest.raises(InsufficientLiquidityError, match="3.0%"):
+            paper_client._check_liquidity(book, price=0.50, size_usdc=100.0)
