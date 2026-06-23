@@ -25,8 +25,8 @@ async def portfolio(tmp_path):
     await pm.close()
 
 
-def make_position(rm, entry=0.50, market_id="mkt-a", size=100.0, trader="0xtrader"):
-    return rm.build_position(
+async def make_position(rm, entry=0.50, market_id="mkt-a", size=100.0, trader="0xtrader"):
+    return await rm.build_position(
         position_id=f"pos-{market_id}-{entry}",
         market_id=market_id,
         token_id=f"tok-{market_id}",
@@ -39,13 +39,13 @@ def make_position(rm, entry=0.50, market_id="mkt-a", size=100.0, trader="0xtrade
 class TestPortfolioManager:
     @pytest.mark.asyncio
     async def test_open_and_count(self, portfolio, rm):
-        pos = make_position(rm)
+        pos = await make_position(rm)
         await portfolio.open_position(pos)
         assert await portfolio.position_count() == 1
 
     @pytest.mark.asyncio
     async def test_get_position(self, portfolio, rm):
-        pos = make_position(rm)
+        pos = await make_position(rm)
         await portfolio.open_position(pos)
         fetched = await portfolio.get_position(pos.position_id)
         assert fetched is not None
@@ -54,7 +54,7 @@ class TestPortfolioManager:
 
     @pytest.mark.asyncio
     async def test_get_position_by_token(self, portfolio, rm):
-        pos = make_position(rm)
+        pos = await make_position(rm)
         await portfolio.open_position(pos)
         fetched = await portfolio.get_position_by_token(pos.token_id)
         assert fetched is not None
@@ -65,11 +65,11 @@ class TestPortfolioManager:
         # Two traders copied into separate positions on the SAME token. Both
         # must be returned so per-tick exit evaluation never orphans the second.
         shared = "tok-shared"
-        pos_a = rm.build_position(
+        pos_a = await rm.build_position(
             position_id="pos-a", market_id="mkt-a", token_id=shared,
             trader_address="0xA", entry_price=0.50, size_shares=100.0,
         )
-        pos_b = rm.build_position(
+        pos_b = await rm.build_position(
             position_id="pos-b", market_id="mkt-a", token_id=shared,
             trader_address="0xB", entry_price=0.50, size_shares=100.0,
         )
@@ -85,7 +85,7 @@ class TestPortfolioManager:
 
     @pytest.mark.asyncio
     async def test_close_position_profit(self, portfolio, rm):
-        pos = make_position(rm, entry=0.50, size=1000.0)
+        pos = await make_position(rm, entry=0.50, size=1000.0)
         await portfolio.open_position(pos)
         pnl = await portfolio.close_position(pos.position_id, 0.60, ExitReason.TAKE_PROFIT)
         assert pnl == pytest.approx(100.0)  # (0.60-0.50)*1000
@@ -98,14 +98,14 @@ class TestPortfolioManager:
 
     @pytest.mark.asyncio
     async def test_get_open_positions(self, portfolio, rm):
-        await portfolio.open_position(make_position(rm, market_id="a"))
-        await portfolio.open_position(make_position(rm, market_id="b"))
+        await portfolio.open_position(await make_position(rm, market_id="a"))
+        await portfolio.open_position(await make_position(rm, market_id="b"))
         open_positions = await portfolio.get_open_positions()
         assert len(open_positions) == 2
 
     @pytest.mark.asyncio
     async def test_update_peak_price(self, portfolio, rm):
-        pos = make_position(rm)
+        pos = await make_position(rm)
         await portfolio.open_position(pos)
         await portfolio.update_peak_price(pos.position_id, 0.70)
         fetched = await portfolio.get_position(pos.position_id)
@@ -113,8 +113,8 @@ class TestPortfolioManager:
 
     @pytest.mark.asyncio
     async def test_trader_pnl_aggregates_closed(self, portfolio, rm):
-        pos1 = make_position(rm, market_id="a", entry=0.50, size=1000.0, trader="0xwhale")
-        pos2 = make_position(rm, market_id="b", entry=0.50, size=1000.0, trader="0xwhale")
+        pos1 = await make_position(rm, market_id="a", entry=0.50, size=1000.0, trader="0xwhale")
+        pos2 = await make_position(rm, market_id="b", entry=0.50, size=1000.0, trader="0xwhale")
         await portfolio.open_position(pos1)
         await portfolio.open_position(pos2)
         await portfolio.close_position(pos1.position_id, 0.60, ExitReason.TAKE_PROFIT)  # +100
@@ -125,9 +125,9 @@ class TestPortfolioManager:
     @pytest.mark.asyncio
     async def test_trader_win_rate_counts_wins_and_sample(self, portfolio, rm):
         # 2 wins, 1 loss for the trader → win_rate=2/3, sample=3.
-        pos1 = make_position(rm, market_id="a", entry=0.50, size=1000.0, trader="0xw")
-        pos2 = make_position(rm, market_id="b", entry=0.50, size=1000.0, trader="0xw")
-        pos3 = make_position(rm, market_id="c", entry=0.50, size=1000.0, trader="0xw")
+        pos1 = await make_position(rm, market_id="a", entry=0.50, size=1000.0, trader="0xw")
+        pos2 = await make_position(rm, market_id="b", entry=0.50, size=1000.0, trader="0xw")
+        pos3 = await make_position(rm, market_id="c", entry=0.50, size=1000.0, trader="0xw")
         await portfolio.open_position(pos1)
         await portfolio.open_position(pos2)
         await portfolio.open_position(pos3)
@@ -146,7 +146,7 @@ class TestPortfolioManager:
     @pytest.mark.asyncio
     async def test_trader_win_rate_ignores_open_positions(self, portfolio, rm):
         # Open positions are not yet realized; only closed ones count.
-        pos = make_position(rm, market_id="a", trader="0xw")
+        pos = await make_position(rm, market_id="a", trader="0xw")
         await portfolio.open_position(pos)
         win_rate, sample = await portfolio.get_trader_win_rate("0xw")
         assert (win_rate, sample) == (0.0, 0)
@@ -156,7 +156,7 @@ class TestPortfolioManager:
         db = str(tmp_path / "persist.db")
         pm1 = PortfolioManager(db_path=db)
         await pm1.init()
-        pos = make_position(rm)
+        pos = await make_position(rm)
         await pm1.open_position(pos)
         await pm1.close()
 
@@ -167,7 +167,7 @@ class TestPortfolioManager:
 
     @pytest.mark.asyncio
     async def test_summary(self, portfolio, rm):
-        pos = make_position(rm, size=1000.0)
+        pos = await make_position(rm, size=1000.0)
         await portfolio.open_position(pos)
         await portfolio.close_position(pos.position_id, 0.60, ExitReason.TAKE_PROFIT)
         summary = await portfolio.summary()
@@ -189,7 +189,7 @@ class TestUninitializedGuard:
     async def test_open_position_before_init_raises(self, rm):
         pm = PortfolioManager(db_path="unused.db")
         with pytest.raises(RuntimeError, match="not initialized"):
-            await pm.open_position(make_position(rm))
+            await pm.open_position(await make_position(rm))
 
     @pytest.mark.asyncio
     async def test_close_before_init_does_not_leak_attribute_error(self, rm):

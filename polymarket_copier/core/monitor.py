@@ -55,7 +55,7 @@ logger = logging.getLogger(__name__)
 POLYMARKET_WS_URL    = "wss://ws-subscriptions-clob.polymarket.com/ws/"
 POLYMARKET_DATA_API  = "https://data-api.polymarket.com"
 
-_WS_PING_INTERVAL    = 30     # seconds between WebSocket keep-alive pings
+_WS_PING_INTERVAL    = 15     # seconds between WebSocket keep-alive pings
 _WS_RECONNECT_DELAY  = 5      # seconds before reconnecting after WS drop
 _POLL_INTERVAL_SEC   = 8      # seconds between wallet activity polls
 _MAX_TRADES_PER_POLL = 50     # number of recent trades to fetch per poll cycle
@@ -166,6 +166,9 @@ class TradeMonitor:
 
         # Token IDs currently subscribed in the WebSocket
         self._subscribed_tokens: Set[str] = set()
+        # Snapshot of what was last sent in a subscription message.
+        # _maybe_update_subscription diffs against this to avoid redundant sends.
+        self._last_subscribed: Set[str] = set()
 
         # Whether the WS is currently connected and healthy
         self._ws_healthy: bool    = False
@@ -266,7 +269,7 @@ class TradeMonitor:
         async with websockets.connect(
             self._ws_url,
             ping_interval=_WS_PING_INTERVAL,
-            ping_timeout=10,
+            ping_timeout=5,
             close_timeout=5,
         ) as ws:
             self._ws_healthy = True
@@ -299,11 +302,13 @@ class TradeMonitor:
         logger.info("WS subscribed to %d token(s): %s", len(token_ids), token_ids[:3])
 
     async def _maybe_update_subscription(self, ws) -> None:
-        """
-        If self._subscribed_tokens has changed since last subscription message,
-        send an updated subscription. Placeholder for a production asyncio.Queue diff.
-        """
-        pass
+        """Send an updated subscription when _subscribed_tokens has changed."""
+        current = set(self._subscribed_tokens)
+        if current != self._last_subscribed:
+            if current:
+                await self._ws_send_subscription(ws, list(current))
+            self._last_subscribed = current
+            logger.info("WS subscription updated: %d token(s)", len(current))
 
     async def _handle_ws_message(self, raw: str) -> None:
         """Parse a WebSocket message and emit PriceTick events for subscribed tokens."""
@@ -341,22 +346,25 @@ class TradeMonitor:
             connector=aiohttp.TCPConnector(limit=20),
             timeout=aiohttp.ClientTimeout(total=10),
         ) as session:
+            # Use a fixed deadline rather than computing leftover time from elapsed.
+            # This prevents drift: a slow poll (e.g. 9s on an 8s interval) would
+            # previously clamp sleep to 0 and effectively double the next interval.
+            next_deadline = time.monotonic() + self._poll_interval
             while not self._stop_event.is_set():
-                cycle_start = time.monotonic()
-
                 await self._poll_all_wallets(session)
 
-                elapsed = time.monotonic() - cycle_start
-                sleep   = max(0.0, self._poll_interval - elapsed)
-                logger.debug("Poll cycle %.2fs. Next in %.2fs.", elapsed, sleep)
+                sleep = max(0.0, next_deadline - time.monotonic())
+                next_deadline += self._poll_interval
+                logger.debug("Poll cycle done. Next in %.2fs.", sleep)
 
-                try:
-                    await asyncio.wait_for(
-                        asyncio.shield(self._stop_event.wait()), timeout=sleep
-                    )
-                    break   # stop_event was set
-                except asyncio.TimeoutError:
-                    pass    # Normal — sleep elapsed, continue polling
+                if sleep > 0.001:
+                    try:
+                        await asyncio.wait_for(
+                            asyncio.shield(self._stop_event.wait()), timeout=sleep
+                        )
+                        break   # stop_event was set
+                    except asyncio.TimeoutError:
+                        pass    # Normal — sleep elapsed, continue polling
 
     async def _poll_all_wallets(self, session: aiohttp.ClientSession) -> None:
         """Fetch activity for all tracked wallets concurrently."""

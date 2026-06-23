@@ -34,10 +34,11 @@ EXAMPLES (defaults: tp_fraction=0.40, sl_fraction=0.25)
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import time
-from dataclasses import dataclass, field
 from datetime import datetime, timezone
+from dataclasses import dataclass, field
 from enum import Enum, auto
 from typing import Dict, Optional, Tuple
 
@@ -181,13 +182,14 @@ class RiskManager:
         self._market_exposure: Dict[str, float] = {}
         # trader_address → total $ value currently copied from that trader
         self._trader_exposure: Dict[str, float] = {}
+        self._exposure_lock = asyncio.Lock()
         # Post-loss cooldown state
         self._consecutive_losses: int = 0
         self._cooldown_until: float   = 0.0
 
     # ── Position factory ──────────────────────────────────────────────────────
 
-    def build_position(
+    async def build_position(
         self,
         position_id:    str,
         market_id:      str,
@@ -207,31 +209,38 @@ class RiskManager:
         """
         _assert_valid_price(entry_price, "entry_price")
 
-        tp, sl         = self._compute_thresholds(entry_price)
+        tp, sl = self._compute_thresholds(entry_price)
+        if tp <= sl:
+            raise InvalidPriceError(
+                f"Degenerate thresholds at entry={entry_price}: tp={tp} <= sl={sl}"
+            )
+
         position_value = entry_price * size_shares
-        self._assert_exposure_cap(market_id, position_value)
-        self._assert_trader_allocation(trader_address, position_value)
 
-        pos = Position(
-            position_id    = position_id,
-            market_id      = market_id,
-            token_id       = token_id,
-            trader_address = trader_address,
-            side           = Side.BUY,
-            entry_price    = entry_price,
-            size_shares    = size_shares,
-            tp_price       = tp,
-            sl_price       = sl,
-            peak_price     = entry_price,
-            resolve_time   = resolve_time,
-        )
+        async with self._exposure_lock:
+            self._assert_exposure_cap(market_id, position_value)
+            self._assert_trader_allocation(trader_address, position_value)
 
-        self._market_exposure[market_id] = (
-            self._market_exposure.get(market_id, 0.0) + position_value
-        )
-        self._trader_exposure[trader_address] = (
-            self._trader_exposure.get(trader_address, 0.0) + position_value
-        )
+            pos = Position(
+                position_id    = position_id,
+                market_id      = market_id,
+                token_id       = token_id,
+                trader_address = trader_address,
+                side           = Side.BUY,
+                entry_price    = entry_price,
+                size_shares    = size_shares,
+                tp_price       = tp,
+                sl_price       = sl,
+                peak_price     = entry_price,
+                resolve_time   = resolve_time,
+            )
+
+            self._market_exposure[market_id] = (
+                self._market_exposure.get(market_id, 0.0) + position_value
+            )
+            self._trader_exposure[trader_address] = (
+                self._trader_exposure.get(trader_address, 0.0) + position_value
+            )
 
         logger.info(
             "build_position | id=%-20s mkt=%s entry=%.4f TP=%.4f SL=%.4f "
@@ -278,9 +287,13 @@ class RiskManager:
                 )
                 return ExitReason.MARKET_RESOLVING
 
-        # 2 ── Update trailing peak ────────────────────────────────────────────
-        if current_price > pos.peak_price:
-            pos.peak_price = current_price
+        # 2 ── Compute effective peak (do NOT mutate pos — caller persists to DB) ──
+        # peak_price/tp_price/sl_price are Optional in the dataclass but __post_init__
+        # guarantees they are non-None for any Position built via build_position().
+        assert pos.peak_price is not None
+        assert pos.tp_price is not None
+        assert pos.sl_price is not None
+        effective_peak = max(pos.peak_price, current_price)
 
         # 3 ── Take profit ──────────────────────────────────────────────────────
         if current_price >= pos.tp_price:
@@ -301,12 +314,12 @@ class RiskManager:
             return ExitReason.STOP_LOSS
 
         # 5 ── Trailing stop (only after price made a new high above entry) ────
-        if pos.peak_price > pos.entry_price:
-            trail_sl = self._compute_trail_sl(pos)
+        if effective_peak > pos.entry_price:
+            trail_sl = self._compute_trail_sl(pos, peak_override=effective_peak)
             if current_price <= trail_sl:
                 logger.info(
                     "TRAILING STOP | id=%s price=%.4f peak=%.4f trail_sl=%.4f",
-                    pos.position_id, current_price, pos.peak_price, trail_sl,
+                    pos.position_id, current_price, effective_peak, trail_sl,
                 )
                 return ExitReason.TRAILING_STOP
 
@@ -327,25 +340,27 @@ class RiskManager:
 
     # ── Record a closed position ───────────────────────────────────────────────
 
-    def record_exit(self, pos: Position, exit_price: float) -> float:
+    async def record_exit(self, pos: Position, exit_price: float) -> float:
         """
         Call after a position closes (any ExitReason except HOLD).
         Updates bankroll, daily PnL, and releases market exposure.
         Returns realized PnL (negative = loss).
         """
         pnl = pos.pnl_at(exit_price)
-        self._daily_pnl  += pnl
-        self.bankroll    += pnl
 
-        released = pos.entry_price * pos.size_shares
-        self._market_exposure[pos.market_id] = max(
-            0.0,
-            self._market_exposure.get(pos.market_id, 0.0) - released,
-        )
-        self._trader_exposure[pos.trader_address] = max(
-            0.0,
-            self._trader_exposure.get(pos.trader_address, 0.0) - released,
-        )
+        async with self._exposure_lock:
+            self._daily_pnl  += pnl
+            self.bankroll    += pnl
+
+            released = pos.entry_price * pos.size_shares
+            self._market_exposure[pos.market_id] = max(
+                0.0,
+                self._market_exposure.get(pos.market_id, 0.0) - released,
+            )
+            self._trader_exposure[pos.trader_address] = max(
+                0.0,
+                self._trader_exposure.get(pos.trader_address, 0.0) - released,
+            )
 
         self._update_cooldown(pnl)
 
@@ -403,7 +418,7 @@ class RiskManager:
         """Current $ allocated in a given market."""
         return self._market_exposure.get(market_id, 0.0)
 
-    def release_exposure(
+    async def release_exposure(
         self, market_id: str, value: float, trader_address: Optional[str] = None
     ) -> None:
         """Release exposure registered by build_position() for a position that was
@@ -413,13 +428,14 @@ class RiskManager:
         Pass ``trader_address`` to also release the per-trader allocation that
         build_position() reserved; otherwise it would leak and slowly choke off
         future copies from that trader."""
-        self._market_exposure[market_id] = max(
-            0.0, self._market_exposure.get(market_id, 0.0) - value
-        )
-        if trader_address is not None:
-            self._trader_exposure[trader_address] = max(
-                0.0, self._trader_exposure.get(trader_address, 0.0) - value
+        async with self._exposure_lock:
+            self._market_exposure[market_id] = max(
+                0.0, self._market_exposure.get(market_id, 0.0) - value
             )
+            if trader_address is not None:
+                self._trader_exposure[trader_address] = max(
+                    0.0, self._trader_exposure.get(trader_address, 0.0) - value
+                )
 
     def market_exposure_cap(self) -> float:
         """Current cap in $ terms (changes as bankroll changes)."""
@@ -444,25 +460,46 @@ class RiskManager:
 
         TP = entry + max(dist_to_ceil × tp_fraction,  min_tp_abs), then clamped ≤ 1.0
         SL = entry − max(dist_to_floor × sl_fraction, min_sl_abs), then clamped ≥ 0.0
+
+        Near-boundary entries get adaptive minimums so TP/SL remain meaningful:
+          entry < 0.02 → min_sl at least 50% of entry (prevents SL clamping to 0)
+          entry > 0.98 → min_tp at least 50% of remaining upside
         """
         dist_ceil  = 1.0 - entry   # remaining upside
         dist_floor = entry         # remaining downside
 
-        tp_raw = entry + max(dist_ceil  * self.cfg.tp_range_fraction, self.cfg.min_tp_abs)
-        sl_raw = entry - max(dist_floor * self.cfg.sl_range_fraction, self.cfg.min_sl_abs)
+        # Adaptive minimums guard against degenerate TP/SL near price extremes.
+        min_tp = self.cfg.min_tp_abs
+        min_sl = self.cfg.min_sl_abs
+        if entry < 0.02:
+            min_sl = max(min_sl, entry * 0.5)
+        if entry > 0.98:
+            min_tp = max(min_tp, dist_ceil * 0.5)
+
+        tp_raw = entry + max(dist_ceil  * self.cfg.tp_range_fraction, min_tp)
+        sl_raw = entry - max(dist_floor * self.cfg.sl_range_fraction, min_sl)
 
         tp = min(tp_raw, 1.0)
         sl = max(sl_raw, 0.0)
 
+        if tp <= sl:
+            raise InvalidPriceError(
+                f"Entry {entry:.4f} produces TP={tp:.4f} ≤ SL={sl:.4f}. "
+                "Widen min_tp_abs / min_sl_abs in config or reject this entry."
+            )
+
         return round(tp, 6), round(sl, 6)
 
-    def _compute_trail_sl(self, pos: Position) -> float:
+    def _compute_trail_sl(self, pos: Position, peak_override: Optional[float] = None) -> float:
         """
         Trailing SL = peak − (peak − hard_SL) × trailing_fraction.
         Never drops below the hard SL.
         """
-        gap      = pos.peak_price - pos.sl_price
-        trail_sl = pos.peak_price - (gap * self.cfg.trailing_stop_fraction)
+        assert pos.sl_price is not None
+        assert pos.peak_price is not None
+        peak     = peak_override if peak_override is not None else pos.peak_price
+        gap      = peak - pos.sl_price
+        trail_sl = peak - (gap * self.cfg.trailing_stop_fraction)
         return max(trail_sl, pos.sl_price)
 
     def _assert_exposure_cap(self, market_id: str, new_value: float) -> None:
@@ -486,7 +523,9 @@ class RiskManager:
             )
 
     def _maybe_reset_daily_window(self) -> None:
-        if time.time() >= self._day_start_ts + 86_400:
+        now_utc   = datetime.fromtimestamp(time.time(), tz=timezone.utc)
+        start_utc = datetime.fromtimestamp(self._day_start_ts, tz=timezone.utc)
+        if now_utc.date() != start_utc.date():
             logger.info("Daily PnL window reset. Previous daily_pnl=%.2f", self._daily_pnl)
             self._daily_pnl    = 0.0
             self._day_start_ts = _midnight_utc()
