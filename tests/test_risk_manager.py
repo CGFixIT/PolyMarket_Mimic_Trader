@@ -683,13 +683,13 @@ class TestRehydrateExposure:
         assert rm.market_exposure("mkt-a") == pytest.approx(1_000.0)
         assert any("exceeds current cap" in r.message for r in caplog.records)
 
-    def test_rehydrated_exposure_feeds_cap_enforcement(self):
+    async def test_rehydrated_exposure_feeds_cap_enforcement(self):
         # After restoring near-cap exposure, a new copy that would breach the
         # market cap must be rejected by build_position().
         rm = RiskManager(config=RiskConfig(max_trader_allocation=1.0), bankroll=10_000.0)
         rm.rehydrate_exposure("mkt-a", "0xA", 790.0)  # cap is $800
         with pytest.raises(ExposureCapError):
-            rm.build_position(
+            await rm.build_position(
                 position_id="p1", market_id="mkt-a", token_id="tok-a",
                 trader_address="0xB", entry_price=0.50, size_shares=100.0,  # +$50
             )
