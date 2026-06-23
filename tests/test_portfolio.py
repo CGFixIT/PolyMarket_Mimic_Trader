@@ -203,7 +203,7 @@ class TestRealizedPnlLedger:
 
     @pytest.mark.asyncio
     async def test_close_records_realized_lot(self, portfolio, rm):
-        pos = make_position(rm, entry=0.50, size=100.0)  # cost basis $50
+        pos = await make_position(rm, entry=0.50, size=100.0)  # cost basis $50
         await portfolio.open_position(pos)
         pnl = await portfolio.close_position(pos.position_id, 0.65, ExitReason.TAKE_PROFIT)
         # (0.65 - 0.50) * 100 = $15 realized
@@ -220,8 +220,8 @@ class TestRealizedPnlLedger:
 
     @pytest.mark.asyncio
     async def test_report_aggregates_multiple_disposals(self, portfolio, rm):
-        win = make_position(rm, entry=0.40, market_id="mkt-w", size=100.0)
-        loss = make_position(rm, entry=0.60, market_id="mkt-l", size=100.0)
+        win = await make_position(rm, entry=0.40, market_id="mkt-w", size=100.0)
+        loss = await make_position(rm, entry=0.60, market_id="mkt-l", size=100.0)
         await portfolio.open_position(win)
         await portfolio.open_position(loss)
         await portfolio.close_position(win.position_id, 0.55, ExitReason.TAKE_PROFIT)   # +15
@@ -233,7 +233,7 @@ class TestRealizedPnlLedger:
 
     @pytest.mark.asyncio
     async def test_long_term_lot_classified(self, portfolio, rm):
-        pos = make_position(rm, entry=0.50, size=100.0)
+        pos = await make_position(rm, entry=0.50, size=100.0)
         pos.entry_time = pos.entry_time - 400 * 86_400  # held > 1 year
         await portfolio.open_position(pos)
         await portfolio.close_position(pos.position_id, 0.60, ExitReason.TAKE_PROFIT)
@@ -246,7 +246,7 @@ class TestRealizedPnlLedger:
     async def test_report_filters_by_year(self, portfolio, rm):
         from datetime import datetime, timezone
 
-        pos = make_position(rm, entry=0.50, size=100.0)
+        pos = await make_position(rm, entry=0.50, size=100.0)
         await portfolio.open_position(pos)
         await portfolio.close_position(pos.position_id, 0.60, ExitReason.TAKE_PROFIT)
 
