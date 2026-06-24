@@ -147,6 +147,20 @@ class TestAppConfig:
         assert config.copy_trading.live_retry_slippage_pct == 0.02  # M12
         assert config.copy_trading.live_order_max_retries == 1  # M12
 
+    def test_slippage_parity_validator_raises_when_paper_exceeds_live(self):
+        # PR2: paper_fill_slippage_pct > max_live_slippage_pct must fail; otherwise
+        # paper simulation is penalised more than live, making back-test PnL optimistic.
+        from pydantic import ValidationError
+
+        with pytest.raises(ValidationError, match="max_live_slippage_pct must be"):
+            AppConfig(copy_trading={"paper_fill_slippage_pct": 0.02, "max_live_slippage_pct": 0.01})
+
+    def test_slippage_parity_validator_passes_when_equal(self):
+        # Exact parity is valid — paper and live share identical slippage budgets.
+        config = AppConfig(copy_trading={"paper_fill_slippage_pct": 0.01, "max_live_slippage_pct": 0.01})
+        assert config.copy_trading.paper_fill_slippage_pct == pytest.approx(0.01)
+        assert config.copy_trading.max_live_slippage_pct == pytest.approx(0.01)
+
     def test_live_retry_slippage_validator(self):
         # M12: retry slippage must be >= base cap and <= 0.05 ceiling; retries in {0,1}.
         from pydantic import ValidationError
