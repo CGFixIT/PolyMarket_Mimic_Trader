@@ -695,19 +695,22 @@ class CopyTrader:
         # H11: read from in-memory cache — no SQLite round-trip per tick.
         # Two tracked traders can each hold a SEPARATE position on the same token;
         # evaluate ALL of them so no position is orphaned on this tick.
-        positions = list(self._pos_cache.get(tick.token_id, []))
-        for pos in positions:
-            reason = self.risk.evaluate(pos, tick.price)
+        bucket = self._pos_cache.get(tick.token_id)
+        if bucket:
+            for pos in list(bucket):  # snapshot: _exit_position removes from bucket in-place
+                reason = self.risk.evaluate(pos, tick.price)
 
-            if pos.peak_price is None or tick.price > pos.peak_price:
-                # H11: update the in-memory object immediately; DB write is debounced.
-                pos.peak_price = tick.price
-                self._peak_dirty[pos.position_id] = tick.price
+                if pos.peak_price is None or tick.price > pos.peak_price:
+                    # H11: update the in-memory object immediately; DB write is debounced.
+                    pos.peak_price = tick.price
+                    self._peak_dirty[pos.position_id] = tick.price
 
-            if reason != ExitReason.HOLD:
-                await self._exit_position(pos, tick.price, reason)
+                if reason != ExitReason.HOLD:
+                    await self._exit_position(pos, tick.price, reason)
 
         # H11: debounced peak flush — at most one SQLite batch-write per interval.
+        # Runs unconditionally so dirty peaks from prior ticks are never stranded
+        # if the next flush opportunity falls on a tick with no active positions.
         if self._peak_dirty and (time.monotonic() - self._last_peak_flush) >= self._peak_persist_interval:
             await self._flush_peak_cache()
 
@@ -871,7 +874,7 @@ class CopyTrader:
         """Poll-based exit check fallback (when WS price feed is unavailable).
 
         H10: Fetches prices in parallel (asyncio.gather) instead of serially.
-        Serial fetches blocked exit detection by N×RTT (e.g. 5 positions × 200ms = 1s)
+        Serial fetches blocked exit detection by N*RTT (e.g. 5 positions * 200ms = 1s)
         meaning a fast adverse move during a WS outage could blow through SL unmanaged.
         """
         positions = await self.portfolio.get_open_positions()

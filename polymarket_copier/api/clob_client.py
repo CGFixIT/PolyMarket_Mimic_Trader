@@ -93,7 +93,7 @@ class ClobClient:
 
         create_or_derive_api_creds() is a blocking call that signs a challenge
         request to derive the CLOB API key from the wallet's private key. It runs
-        lazily on the first live order by default, adding ~200–500ms to copy
+        lazily on the first live order by default, adding ~200-500ms to copy
         latency for that first trade. Calling this at startup amortises the cost
         before any whale trade is detected. No-op in paper mode.
         """
@@ -417,7 +417,9 @@ class ClobClient:
             return result
 
         confirmed = float(confirm["filled_size"])
-        remaining = intended_shares - confirmed
+        # Guard float underflow: if confirmed rounds above intended due to machine
+        # epsilon, remaining could be a tiny negative. Clamp before the shares check.
+        remaining = max(0.0, intended_shares - confirmed)
         if remaining <= _MIN_RETRY_SHARES:
             result["filled_size"] = confirmed
             if confirm.get("avg_price") is not None:
