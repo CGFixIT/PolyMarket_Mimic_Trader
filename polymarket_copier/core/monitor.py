@@ -59,7 +59,8 @@ _WS_PING_INTERVAL    = 15     # seconds between WebSocket keep-alive pings
 _WS_RECONNECT_DELAY  = 5      # seconds before reconnecting after WS drop
 _POLL_INTERVAL_SEC   = 8      # seconds between wallet activity polls
 _MAX_TRADES_PER_POLL = 50     # number of recent trades to fetch per poll cycle
-_MAX_WS_RETRIES      = 5      # max consecutive WS reconnect attempts before fallback
+_MAX_WS_RETRIES      = 5      # consecutive failures before logging a warning burst
+_WS_MAX_BACKOFF      = 30.0   # H10: cap so WS retries at most every 30s, never 80s+
 
 
 # ─── Data Models ──────────────────────────────────────────────────────────────
@@ -132,6 +133,7 @@ class TradeMonitor:
         data_api_base:   str   = POLYMARKET_DATA_API,
         prime_on_start:  bool  = True,
         rate_limiter:    Optional[AsyncLimiter] = None,
+        ws_max_backoff:  float = _WS_MAX_BACKOFF,
     ):
         if not tracked_wallets:
             raise ValueError("tracked_wallets must be non-empty.")
@@ -142,6 +144,7 @@ class TradeMonitor:
         self._poll_interval = poll_interval
         self._ws_url        = ws_url
         self._data_api_base = data_api_base
+        self._ws_max_backoff = ws_max_backoff
         # Rate-limit the hot REST poll path to avoid 429s from the Data API.
         # Default: 25 requests / 60 s (headroom below the assumed 30/min cap).
         # Inject a custom limiter in main.py to share budget across components.
@@ -254,31 +257,43 @@ class TradeMonitor:
     async def _ws_loop(self) -> None:
         """
         Maintains a persistent WebSocket connection to the Polymarket CLOB.
-        Reconnects automatically with exponential back-off up to _MAX_WS_RETRIES.
+
+        H10: Reconnects indefinitely with capped exponential back-off — never
+        permanently abandons the WS. After _MAX_WS_RETRIES consecutive failures
+        we log a warning burst, but the loop keeps retrying at _ws_max_backoff
+        cadence. The WS healthy flag lets exit_check_loop tighten its cadence
+        while the WS is down.
         """
         while not self._stop_event.is_set():
             try:
                 await self._ws_connect_and_listen()
-                self._ws_retry_count = 0  # Reset on clean disconnect
+                self._ws_retry_count = 0  # reset on clean disconnect or reconnect
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
                 self._ws_healthy      = False
                 self._ws_retry_count += 1
 
-                if self._ws_retry_count >= _MAX_WS_RETRIES:
-                    logger.error(
-                        "WebSocket failed after %d retries (%s). "
-                        "Falling back to poll-only mode.",
-                        _MAX_WS_RETRIES, exc,
-                    )
-                    return  # Task exits; poll loop continues
-
-                delay = _WS_RECONNECT_DELAY * (2 ** (self._ws_retry_count - 1))
-                logger.warning(
-                    "WebSocket disconnected (%s). Retry %d/%d in %.0fs.",
-                    exc, self._ws_retry_count, _MAX_WS_RETRIES, delay,
+                # H10: cap back-off so we retry at least every ws_max_backoff seconds;
+                # previous bug had delay reaching 5*2^4=80s, leaving positions unmanaged.
+                delay = min(
+                    _WS_RECONNECT_DELAY * (2 ** (self._ws_retry_count - 1)),
+                    self._ws_max_backoff,
                 )
+
+                if self._ws_retry_count == _MAX_WS_RETRIES:
+                    # Log once at the milestone; keep going (never permanently return).
+                    logger.error(
+                        "WebSocket: %d consecutive failures (%s). "
+                        "Continuing to retry every %.0fs. "
+                        "Exit poll is running faster in the meantime.",
+                        _MAX_WS_RETRIES, exc, delay,
+                    )
+                else:
+                    logger.warning(
+                        "WebSocket disconnected (%s). Retry %d in %.0fs.",
+                        exc, self._ws_retry_count, delay,
+                    )
                 await asyncio.sleep(delay)
 
     async def _ws_connect_and_listen(self) -> None:

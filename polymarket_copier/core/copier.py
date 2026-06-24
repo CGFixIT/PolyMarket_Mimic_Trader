@@ -189,6 +189,18 @@ class CopyTrader:
             )
             return
 
+        # 4c. H5: pre-copy edge check — skip if round-trip fees consume all upside.
+        # Estimate TP at current_price; if adjusted entry (current + round-trip cost)
+        # already exceeds estimated TP, there is no profitable path after fees.
+        tp_estimate, _ = self.risk._compute_thresholds(current_price)
+        adj_entry = current_price * (1.0 + ct.round_trip_fee_pct)
+        if tp_estimate <= adj_entry:
+            logger.info(
+                "Skip: post-fee edge exhausted (tp=%.4f <= adj_entry=%.4f at %.1f%% fee)",
+                tp_estimate, adj_entry, ct.round_trip_fee_pct * 100,
+            )
+            return
+
         # 5. Market volume check.
         if market and market.volume_24h < self.config.copy_trading.min_market_volume:
             logger.info(
@@ -360,15 +372,18 @@ class CopyTrader:
                     filled_shares, size_shares, release_value, event.market_id[:10],
                 )
 
-            # Set entry/peak to the actual average fill price. In PAPER mode this is
-            # the slippage/fee-adjusted fill_price (full fill), preserving the prior
-            # behaviour exactly; in LIVE it is the real execution price. This subsumes
-            # the old `fill_price != pos.entry_price` adjustment — applied exactly
-            # once here, never doubled.
+            # H5: Set entry/peak to the actual average fill price and recompute TP/SL.
+            # In PAPER mode this is the slippage/fee-adjusted fill_price (full fill).
+            # In LIVE it is the real execution price (avg_fill from reconciled response).
+            # Recomputing TP/SL at fill_price ensures thresholds are correct for the
+            # price we actually paid — not the midpoint we quoted.
             fill_price = avg_fill_price
             if fill_price != pos.entry_price:
+                new_tp, new_sl = self.risk._compute_thresholds(fill_price)
                 pos.entry_price = fill_price
                 pos.peak_price  = fill_price
+                pos.tp_price    = new_tp
+                pos.sl_price    = new_sl
 
             decision_latency = time.monotonic() - decision_start
             logger.info(
@@ -581,11 +596,26 @@ class CopyTrader:
             await self._exit_position(pos, exit_price, ExitReason.SOURCE_EXIT)
 
     async def check_all_exits(self) -> None:
-        """Poll-based exit check fallback (when WS price feed is unavailable)."""
+        """Poll-based exit check fallback (when WS price feed is unavailable).
+
+        H10: Fetches prices in parallel (asyncio.gather) instead of serially.
+        Serial fetches blocked exit detection by N×RTT (e.g. 5 positions × 200ms = 1s)
+        meaning a fast adverse move during a WS outage could blow through SL unmanaged.
+        """
         positions = await self.portfolio.get_open_positions()
-        for pos in positions:
-            price = await self.gamma.get_market_price(pos.token_id)
-            if price is None:
+        if not positions:
+            return
+
+        prices = await asyncio.gather(
+            *(self.gamma.get_market_price(p.token_id) for p in positions),
+            return_exceptions=True,
+        )
+
+        for pos, price in zip(positions, prices, strict=True):
+            # gather(return_exceptions=True) yields BaseException on failure; skip
+            # those and any None (price unavailable). The isinstance check narrows
+            # the type so `price` is a plain float below.
+            if isinstance(price, BaseException) or price is None:
                 continue
             reason = self.risk.evaluate(pos, price)
             if reason != ExitReason.HOLD:

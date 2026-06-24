@@ -98,6 +98,7 @@ async def run_bot(config_path: Optional[str] = None, mode: Optional[str] = None)
         on_trade=copier.handle_trade_event,
         on_price=copier.handle_price_tick,
         poll_interval=config.polling_interval_seconds,
+        ws_max_backoff=config.risk_management.ws_max_backoff_seconds,
     )
     copier.monitor = monitor
 
@@ -164,9 +165,16 @@ async def run_bot(config_path: Optional[str] = None, mode: Optional[str] = None)
                 logger.info("Demoted %d traders, now tracking %d", len(demoted), len(remaining))
 
     async def exit_check_loop() -> None:
+        # H10: tighten exit poll cadence when WS is down so TP/SL latency stays low
+        # even without real-time price ticks.
+        fast_interval = config.risk_management.exit_poll_fast_seconds
         while not shutdown_event.is_set():
             await copier.check_all_exits()
-            await asyncio.sleep(config.polling_interval_seconds)
+            interval = (
+                fast_interval if not monitor.ws_healthy
+                else config.polling_interval_seconds
+            )
+            await asyncio.sleep(interval)
 
     async def shutdown_watcher() -> None:
         await shutdown_event.wait()
