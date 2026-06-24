@@ -72,9 +72,13 @@ async def run_bot(config_path: Optional[str] = None, mode: Optional[str] = None)
         min_total_pnl=config.trader_selection.min_pnl,
         min_win_rate=config.trader_selection.min_win_rate,
         min_trade_count=config.trader_selection.min_trades,
+        min_expectancy=config.trader_selection.min_expectancy,
         half_life_days=config.trader_selection.half_life_days,
         max_top_traders=config.trader_selection.max_top_traders,
+        sharpe_cap=config.trader_selection.sharpe_cap,
+        sharpe_shrink_min_trades=config.trader_selection.sharpe_shrink_min_trades,
         rebalance_interval_days=config.trader_selection.rebalance_days,
+        recent_window_days=config.trader_selection.recent_window_days,
     )
     tracker = TrackerClient(config=tracker_cfg)
     top_traders = await tracker.refresh()
