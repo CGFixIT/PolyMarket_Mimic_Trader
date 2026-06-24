@@ -227,7 +227,16 @@ class ClobClient:
             # live) so paper PnL reflects the deeper book-walk of large orders. Fee
             # is linear and size-independent, so it is NOT scaled.
             slip = self.config.copy_trading.paper_fill_slippage_pct * self._size_multiplier(order.size_usdc)
-            fee = self.config.copy_trading.paper_taker_fee_pct
+            # L6: apply taker fee for FOK/FAK (immediate-execution) orders and maker
+            # fee for resting GTC/GTD orders. Polymarket charges 2% for takers and
+            # 0% for makers; splitting them here keeps paper P&L correct when
+            # entry_order_type / exit_order_type are set to GTC/GTD.
+            is_taker = order.order_type in ("FOK", "FAK")
+            fee = (
+                self.config.copy_trading.paper_taker_fee_pct
+                if is_taker
+                else self.config.copy_trading.paper_maker_fee_pct
+            )
             cost = slip + fee
             if order.side == "BUY":
                 fill_price = min(order.price * (1.0 + cost), 1.0)

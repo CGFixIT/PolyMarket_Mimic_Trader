@@ -139,8 +139,13 @@ class RiskConfig:
     cooldown_after_losses: int = 3  # Pause entries after N consecutive losses
     cooldown_minutes: int = 60  # Length of that pause
 
-    # --- Market resolution blackout ---
+    # --- Market resolution blackout (M3: tiered) ---
+    # resolution_blackout_hours: outer soft window — in [hard, soft) the market is
+    # exited only if the price has reached an extreme (low liquidity for exit).
+    # resolution_hard_blackout_hours: inner hard window — always exit here.
     resolution_blackout_hours: float = 24.0
+    resolution_hard_blackout_hours: float = 6.0
+    resolution_soft_blackout_price_threshold: float = 0.85
 
 
 # ─── Position ─────────────────────────────────────────────────────────────────
@@ -318,17 +323,29 @@ class RiskManager:
             )
             return ExitReason.DAILY_LOSS_LIMIT
 
-        # 1 ── Market resolution blackout ──────────────────────────────────────
+        # 1 ── Market resolution blackout (M3: tiered) ────────────────────────
+        # Hard window (< hard_blackout_hours): always exit — too close to resolve
+        # for a managed exit, liquidity collapses as market locks.
+        # Soft window ([hard, blackout) hours): only exit if the price is extreme
+        # (>= threshold or <= 1 − threshold) where the winning side can't sell near
+        # $1.00 and the losing side can't sell at all. Non-extreme prices in this
+        # window still have real price discovery and are worth holding.
         if pos.resolve_time is not None:
             hours_to_resolve = (pos.resolve_time - time.time()) / 3_600.0
             if 0.0 < hours_to_resolve < self.cfg.resolution_blackout_hours:
-                logger.info(
-                    "RESOLUTION BLACKOUT | id=%s mkt=%s resolves_in=%.1fh",
-                    pos.position_id,
-                    pos.market_id,
-                    hours_to_resolve,
-                )
-                return ExitReason.MARKET_RESOLVING
+                in_hard_window = hours_to_resolve < self.cfg.resolution_hard_blackout_hours
+                thresh = self.cfg.resolution_soft_blackout_price_threshold
+                price_is_extreme = current_price >= thresh or current_price <= (1.0 - thresh)
+                if in_hard_window or price_is_extreme:
+                    logger.info(
+                        "RESOLUTION BLACKOUT | id=%s mkt=%s resolves_in=%.1fh hard=%s extreme=%s",
+                        pos.position_id,
+                        pos.market_id,
+                        hours_to_resolve,
+                        in_hard_window,
+                        price_is_extreme,
+                    )
+                    return ExitReason.MARKET_RESOLVING
 
         # 2 ── Compute effective peak (do NOT mutate pos — caller persists to DB) ──
         # peak_price/tp_price/sl_price are Optional in the dataclass but __post_init__

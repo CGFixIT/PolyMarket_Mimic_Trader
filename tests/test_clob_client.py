@@ -34,13 +34,14 @@ def live_client() -> ClobClient:
     return ClobClient(AppConfig(mode="live", bankroll=10_000))
 
 
-def buy_order(price=0.50, size_usdc=100.0) -> Order:
+def buy_order(price=0.50, size_usdc=100.0, order_type="FOK") -> Order:
     return Order(
         market_id="mkt-a",
         token_id="tok-a",
         side="BUY",
         price=price,
         size_usdc=size_usdc,
+        order_type=order_type,
     )
 
 
@@ -135,7 +136,7 @@ class TestPaperFillPrice:
 
     @pytest.mark.asyncio
     async def test_sell_fill_price_below_order_price(self, paper_client):
-        order = Order(market_id="mkt-a", token_id="tok-a", side="SELL", price=0.80, size_usdc=100.0)
+        order = Order(market_id="mkt-a", token_id="tok-a", side="SELL", price=0.80, size_usdc=100.0, order_type="FAK")
         result = await paper_client.place_order(order)
         assert "fill_price" in result
         # fill = 0.80 * (1 - 0.025) = 0.78

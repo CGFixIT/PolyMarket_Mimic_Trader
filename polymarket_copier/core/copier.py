@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import math
 import time
 import uuid
 
@@ -235,12 +236,32 @@ class CopyTrader:
             self._record_skip("missing_market_data", event)
             return
         if market and market.resolve_time:
-            blackout_hours = self.config.risk_management.resolution_blackout_hours
+            rm_cfg = self.config.risk_management
+            blackout_hours = rm_cfg.resolution_blackout_hours
+            hard_blackout = rm_cfg.resolution_hard_blackout_hours
+            soft_thresh = rm_cfg.resolution_soft_blackout_price_threshold
             hours_to_resolve = (market.resolve_time.timestamp() - time.time()) / 3600
             if 0 < hours_to_resolve < blackout_hours:
-                logger.info("Skip: market resolves in %.1fh (blackout)", hours_to_resolve)
-                self._record_skip("resolution_blackout", event, hours_to_resolve=round(hours_to_resolve, 1))
-                return
+                # M3: tiered — always skip in hard window; in soft window skip only
+                # at extreme prices where entry would have no profitable exit path.
+                in_hard = hours_to_resolve < hard_blackout
+                price_extreme = current_price is not None and (
+                    current_price >= soft_thresh or current_price <= (1.0 - soft_thresh)
+                )
+                if in_hard or price_extreme:
+                    logger.info(
+                        "Skip: market resolves in %.1fh (blackout hard=%s extreme=%s)",
+                        hours_to_resolve,
+                        in_hard,
+                        price_extreme,
+                    )
+                    self._record_skip(
+                        "resolution_blackout",
+                        event,
+                        hours_to_resolve=round(hours_to_resolve, 1),
+                        hard=in_hard,
+                    )
+                    return
 
         # H8: Validate the token is a recognized outcome for this market.
         # A mislabeled Data-API row → buying the wrong side = 100% loss.
@@ -401,6 +422,24 @@ class CopyTrader:
             return
 
         size_shares = copy_size_usdc / max(current_price, 1e-6)
+
+        # M15: round price to the CLOB tick before reserving exposure so the order
+        # price matches what the venue accepts. Round BUY prices DOWN (we pay the
+        # rounded price, never more than expected). Re-derive shares at the rounded
+        # price so the USDC cost stays the same. Then floor shares to min granularity
+        # and reject sub-minimum orders before any exposure is reserved.
+        tick = ct.order_price_tick
+        if tick > 0 and current_price > 0:
+            current_price = math.floor(current_price / tick) * tick
+            if current_price <= 0:
+                self._record_skip("zero_rounded_price", event)
+                return
+            size_shares = copy_size_usdc / current_price
+        if ct.order_min_shares > 0:
+            size_shares = math.floor(size_shares / ct.order_min_shares) * ct.order_min_shares
+            if size_shares < ct.order_min_shares:
+                self._record_skip("sub_min_order", event, copy_size_usdc=round(copy_size_usdc, 4))
+                return
 
         resolve_ts = None
         if market and market.resolve_time:

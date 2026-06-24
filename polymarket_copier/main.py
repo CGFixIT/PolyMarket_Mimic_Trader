@@ -66,6 +66,8 @@ async def run_bot(config_path: Optional[str] = None, mode: Optional[str] = None)
         cooldown_after_losses=config.risk_management.cooldown_after_losses,
         cooldown_minutes=config.risk_management.cooldown_minutes,
         resolution_blackout_hours=config.risk_management.resolution_blackout_hours,
+        resolution_hard_blackout_hours=config.risk_management.resolution_hard_blackout_hours,
+        resolution_soft_blackout_price_threshold=config.risk_management.resolution_soft_blackout_price_threshold,
         max_total_exposure_pct=config.risk_management.max_total_exposure_pct,
     )
     risk_manager = RiskManager(config=risk_cfg, bankroll=config.bankroll)

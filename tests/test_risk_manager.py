@@ -291,7 +291,8 @@ class TestEvaluatePriority:
 
     @pytest.mark.asyncio
     async def test_resolution_blackout_overrides_hold(self, rm):
-        resolve_soon = time.time() + (12 * 3_600)
+        # 4h to resolve → hard blackout (<6h) → always exit regardless of price
+        resolve_soon = time.time() + (4 * 3_600)
         pos = await build(rm, 0.50, resolve_ts=resolve_soon)
         assert rm.evaluate(pos, 0.55) == ExitReason.MARKET_RESOLVING
 
@@ -517,16 +518,39 @@ class TestDailyLossCircuitBreaker:
 
 class TestResolutionBlackout:
     @pytest.mark.asyncio
-    async def test_blackout_within_24h(self, rm):
-        resolve_ts = time.time() + (6 * 3_600)
+    async def test_blackout_within_hard_window(self, rm):
+        # 3h to resolve → inside 6h hard window → always exit
+        resolve_ts = time.time() + (3 * 3_600)
         pos = await build(rm, 0.50, resolve_ts=resolve_ts)
         assert rm.evaluate(pos, 0.55) == ExitReason.MARKET_RESOLVING
 
     @pytest.mark.asyncio
+    async def test_blackout_soft_window_extreme_price(self, rm):
+        # 12h to resolve → soft window (6–24h); extreme price (≥0.85) → exit
+        resolve_ts = time.time() + (12 * 3_600)
+        pos = await build(rm, 0.50, resolve_ts=resolve_ts)
+        assert rm.evaluate(pos, 0.90) == ExitReason.MARKET_RESOLVING
+
+    @pytest.mark.asyncio
+    async def test_blackout_soft_window_non_extreme_holds(self, rm):
+        # 12h to resolve → soft window; non-extreme price (0.55) → hold (keep trading)
+        resolve_ts = time.time() + (12 * 3_600)
+        pos = await build(rm, 0.50, resolve_ts=resolve_ts)
+        assert rm.evaluate(pos, 0.55) == ExitReason.HOLD
+
+    @pytest.mark.asyncio
     async def test_blackout_exactly_at_boundary(self, rm):
+        # Just inside 24h but non-extreme → soft window → hold
         resolve_ts = time.time() + (23 * 3_600 + 59 * 60)
         pos = await build(rm, 0.50, resolve_ts=resolve_ts)
-        assert rm.evaluate(pos, 0.55) == ExitReason.MARKET_RESOLVING
+        assert rm.evaluate(pos, 0.55) == ExitReason.HOLD
+
+    @pytest.mark.asyncio
+    async def test_blackout_boundary_extreme_price(self, rm):
+        # Just inside 24h, extreme price → soft window exits
+        resolve_ts = time.time() + (23 * 3_600 + 59 * 60)
+        pos = await build(rm, 0.50, resolve_ts=resolve_ts)
+        assert rm.evaluate(pos, 0.90) == ExitReason.MARKET_RESOLVING
 
     @pytest.mark.asyncio
     async def test_no_blackout_25h_out(self, rm):
@@ -541,13 +565,14 @@ class TestResolutionBlackout:
 
     @pytest.mark.asyncio
     async def test_custom_blackout_window(self):
+        # Custom 48h window, hard blackout stays 6h; 36h away → soft window + extreme price → exit
         cfg = RiskConfig(resolution_blackout_hours=48.0)
         rm = RiskManager(config=cfg, bankroll=BANKROLL)
         resolve_ts = time.time() + (36 * 3_600)
         pos = await rm.build_position(
             "p1", "m1", "t1", "0xA", entry_price=0.50, size_shares=100.0, resolve_time=resolve_ts
         )
-        assert rm.evaluate(pos, 0.55) == ExitReason.MARKET_RESOLVING
+        assert rm.evaluate(pos, 0.90) == ExitReason.MARKET_RESOLVING
 
 
 # ─── [I] Per-Trader Allocation Cap ────────────────────────────────────────────

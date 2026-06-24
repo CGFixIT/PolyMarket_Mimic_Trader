@@ -65,6 +65,13 @@ class CopyTradingConfig(BaseModel):
     # this we'd race a stale edge. False disables the second fetch.
     revalidate_edge_before_order: bool = True
     min_market_volume: float = 5000
+    # M15: CLOB order placement rounding. Polymarket venue rejects off-tick prices
+    # and sub-minimum order sizes. Round price DOWN for BUY (never pay more than
+    # intended) and size DOWN to avoid exceeding the USDC budget.
+    # 0 disables each gate: order_price_tick=0 skips rounding; order_min_shares=0
+    # skips the sub-min check.
+    order_price_tick: float = 0.01  # Polymarket cent-granularity tick
+    order_min_shares: float = 1.0  # Minimum shares per order
     # Skip trades older than this at detection time — by then the source's alpha
     # has decayed and we'd only be buying into their price impact (adverse
     # selection). 0 disables the gate.
@@ -113,7 +120,11 @@ class CopyTradingConfig(BaseModel):
     # Paper-mode fill simulation: apply half-spread slippage + taker fee so
     # paper PnL reflects live execution costs rather than zero-cost fills.
     paper_fill_slippage_pct: float = 0.005  # ~0.5% half-spread
-    paper_taker_fee_pct: float = 0.02  # Polymarket CLOB taker fee
+    paper_taker_fee_pct: float = 0.02  # Polymarket CLOB taker fee (FOK/FAK)
+    # L6: maker fee for resting GTC/GTD orders (typically 0% on Polymarket, may
+    # include a rebate on some venues). Separate from taker fee so paper P&L
+    # correctly models GTC-order strategies without over-penalising with a 2% fee.
+    paper_maker_fee_pct: float = 0.0  # Polymarket GTC limit orders: no maker fee
     # Live-mode slippage cap: reject a BUY if no ask depth exists within this
     # fraction of the requested price. Prevents inadvertently paying far above
     # the quoted price when the order book is thin or the market moves fast.
@@ -182,6 +193,12 @@ class RiskManagementConfig(BaseModel):
     daily_loss_limit_pct: float = 0.03
     max_market_exposure_pct: float = 0.08
     resolution_blackout_hours: float = 24.0
+    # M3: tiered resolution blackout. Within hard_blackout_hours of resolve, always
+    # exit (original flat behaviour). In the soft window (hard..blackout hours), only
+    # exit when price is extreme (near certain outcome), recovering the high-alpha
+    # final-day window when the market still has genuine price discovery.
+    resolution_hard_blackout_hours: float = 6.0
+    resolution_soft_blackout_price_threshold: float = 0.85
     drawdown_stop_pct: float = 0.08
     cooldown_after_losses: int = 3
     cooldown_minutes: int = 60

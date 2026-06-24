@@ -747,6 +747,7 @@ class TestKellyTrackerPrior:
         copier.config.copy_trading.tracker_prior_decay_enabled = True
         copier.config.copy_trading.kelly_fraction_multiplier = 0.25
         copier.config.copy_trading.max_trade_pct = 0.02
+        copier.config.copy_trading.order_min_shares = 0  # isolate Kelly decay; min-size filter tested separately
         await _seed_closed_trades(copier.portfolio, "0xwhale", wins=5, losses=0)
         copier.update_tracker_mean_pnl({"0xwhale": 0.40})
         # Backdate the update ~1000h → decay = 1/(1+1000) ≈ 0.001 → edge ≈ 0.
