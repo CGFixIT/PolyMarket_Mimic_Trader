@@ -61,6 +61,10 @@ class CopyTradingConfig(BaseModel):
     # the quoted price when the order book is thin or the market moves fast.
     # Must match or exceed paper_fill_slippage_pct so live/paper parity holds.
     max_live_slippage_pct: float = 0.01       # 1% max walk above order price
+    # H5: Expected round-trip cost (entry slip + taker fee + exit fee) used for
+    # the pre-copy edge check and the TP revalidation after fill reconciliation.
+    # Default matches paper mode (0.5% slip + 2% fee + 2% exit fee ≈ 4.5%).
+    round_trip_fee_pct: float = 0.045
     # Edge-aware (fractional-Kelly) position sizing. OFF by default — opt-in, so
     # enabling it is the only thing that changes copy-size behaviour. When on,
     # sizing uses kelly_size_usdc() with the trader's observed win rate, but only
@@ -98,6 +102,11 @@ class RiskManagementConfig(BaseModel):
     fail_closed_on_missing_data: bool = True
     # H4: Maximum fraction of bankroll deployed across all open positions at once.
     max_total_exposure_pct: float = 0.30
+    # H10: WebSocket reconnect backoff cap and fast exit-poll interval.
+    # Cap ensures WS reconnects are attempted at least every 30s (not 80s+).
+    ws_max_backoff_seconds: float = 30.0
+    # When WS is down, check exits this often instead of the normal poll_interval.
+    exit_poll_fast_seconds: float = 2.0
 
 
 class LoggingConfig(BaseModel):

@@ -345,10 +345,11 @@ class TestRateLimiterOnPollPath:
 # ─── WebSocket Reconnect Fallback ─────────────────────────────────────────────
 
 class TestWsReconnectFallback:
-    """After _MAX_WS_RETRIES consecutive failures _ws_loop should exit (poll-only)."""
+    """H10: _ws_loop NEVER permanently exits — it retries indefinitely with capped backoff."""
 
     @pytest.mark.asyncio
-    async def test_ws_loop_exits_after_max_retries(self):
+    async def test_ws_loop_continues_past_max_retries(self):
+        # H10: loop must keep retrying past _MAX_WS_RETRIES (old behavior was to exit).
         from unittest.mock import AsyncMock, patch
         from polymarket_copier.core.monitor import _MAX_WS_RETRIES
 
@@ -358,23 +359,26 @@ class TestWsReconnectFallback:
         )
 
         call_count = 0
+        stop_after = _MAX_WS_RETRIES + 3  # well past the old exit point
 
         async def always_fail():
             nonlocal call_count
             call_count += 1
+            if call_count >= stop_after:
+                monitor._stop_event.set()  # let the loop exit cleanly
             raise ConnectionError("simulated WS drop")
 
         with patch.object(monitor, "_ws_connect_and_listen", side_effect=always_fail):
             with patch("asyncio.sleep", new_callable=AsyncMock):
                 await monitor._ws_loop()
 
-        # _ws_loop must have returned (not infinite-looped) and retried exactly
-        # _MAX_WS_RETRIES times before falling back.
-        assert call_count == _MAX_WS_RETRIES
+        # Must have continued retrying past the old _MAX_WS_RETRIES hard stop.
+        assert call_count >= stop_after
         assert monitor._ws_healthy is False
 
     @pytest.mark.asyncio
-    async def test_ws_healthy_false_after_fallback(self):
+    async def test_ws_healthy_false_after_failures(self):
+        # H10: ws_healthy stays False while WS is down; loop remains alive.
         from unittest.mock import AsyncMock, patch
 
         monitor = TradeMonitor(
@@ -382,8 +386,13 @@ class TestWsReconnectFallback:
             on_trade=_noop_trade,
         )
         monitor._ws_healthy = True  # start as healthy
+        calls = 0
 
         async def always_fail():
+            nonlocal calls
+            calls += 1
+            if calls >= 3:
+                monitor._stop_event.set()
             raise OSError("network gone")
 
         with patch.object(monitor, "_ws_connect_and_listen", side_effect=always_fail):
@@ -410,6 +419,38 @@ class TestWsReconnectFallback:
             await monitor._ws_loop()
 
         assert monitor._ws_retry_count == 0
+
+    @pytest.mark.asyncio
+    async def test_backoff_capped_at_ws_max_backoff(self):
+        """H10: backoff is capped so we retry at most every ws_max_backoff_seconds."""
+        from unittest.mock import AsyncMock, patch
+
+        cap = 7.0
+        monitor = TradeMonitor(
+            tracked_wallets=["0xABC"],
+            on_trade=_noop_trade,
+            ws_max_backoff=cap,
+        )
+        sleep_calls = []
+
+        async def fake_sleep(delay):
+            sleep_calls.append(delay)
+
+        calls = 0
+
+        async def always_fail():
+            nonlocal calls
+            calls += 1
+            if calls >= 8:
+                monitor._stop_event.set()
+            raise ConnectionError("drop")
+
+        with patch.object(monitor, "_ws_connect_and_listen", side_effect=always_fail):
+            with patch("asyncio.sleep", side_effect=fake_sleep):
+                await monitor._ws_loop()
+
+        # Every sleep call must respect the cap.
+        assert all(d <= cap + 1e-6 for d in sleep_calls), sleep_calls
 
 
 # ─── C5: set_wallets — rebalance without KeyError on new wallets ──────────────
