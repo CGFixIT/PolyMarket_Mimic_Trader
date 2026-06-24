@@ -260,6 +260,40 @@ class TestDoubleExitGuard:
         assert report["disposals"] == 1
 
 
+class TestOpenUnrealizedPnlConservative:
+    """get_open_unrealized_pnl_conservative returns sum of worst-case PnL (at SL)
+    for all open positions — the floor used by the daily-loss circuit breaker."""
+
+    async def test_empty_portfolio_returns_zero(self, portfolio):
+        result = await portfolio.get_open_unrealized_pnl_conservative()
+        assert result == pytest.approx(0.0)
+
+    async def test_single_open_position_is_negative(self, portfolio, rm):
+        pos = await make_position(rm, entry=0.50, size=100.0)
+        await portfolio.open_position(pos)
+        result = await portfolio.get_open_unrealized_pnl_conservative()
+        expected = pos.pnl_at(pos.sl_price)  # (sl_price - entry_price) * shares, always <= 0
+        assert result == pytest.approx(expected)
+        assert result <= 0.0
+
+    async def test_multiple_open_positions_aggregate(self, portfolio, rm):
+        pos_a = await make_position(rm, market_id="x", entry=0.50, size=100.0)
+        pos_b = await make_position(rm, market_id="y", entry=0.70, size=200.0)
+        await portfolio.open_position(pos_a)
+        await portfolio.open_position(pos_b)
+        result = await portfolio.get_open_unrealized_pnl_conservative()
+        expected = pos_a.pnl_at(pos_a.sl_price) + pos_b.pnl_at(pos_b.sl_price)
+        assert result == pytest.approx(expected)
+        assert result <= 0.0
+
+    async def test_excludes_closed_positions(self, portfolio, rm):
+        pos = await make_position(rm, entry=0.50, size=100.0)
+        await portfolio.open_position(pos)
+        await portfolio.close_position(pos.position_id, 0.60, ExitReason.TAKE_PROFIT)
+        result = await portfolio.get_open_unrealized_pnl_conservative()
+        assert result == pytest.approx(0.0)
+
+
 class TestRealizedPnlLedger:
     """The tax-lot ledger written on close_position() and its reporting."""
 
