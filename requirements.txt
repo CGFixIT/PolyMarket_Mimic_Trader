@@ -6,8 +6,13 @@ python-dotenv>=1.0.0,<2.0
 pydantic>=2.0.0,<3.0
 aiosqlite>=0.20.0,<1.0
 aiolimiter>=1.1.0,<2.0
-pytest>=8.0.0,<9.0
-pytest-asyncio>=0.23.0,<1.0
+
+# Test tooling is intentionally left UNBOUNDED. These are dev-only dependencies
+# (never shipped at runtime), so the "block unreviewed major bumps" rationale
+# above does not apply — and capping them blocks security patches: pytest's fix
+# for CVE-2025-71176 first ships in 9.0.3, which a `<9.0` cap would exclude.
+pytest>=8.0.0
+pytest-asyncio>=0.23.0
 
 # Optional (M16): Prometheus metrics export. The bot degrades gracefully to
 # no-op metrics when this is absent (see core/metrics.py). Uncomment / install to
