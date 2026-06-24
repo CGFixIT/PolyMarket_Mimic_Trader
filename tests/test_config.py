@@ -102,6 +102,58 @@ class TestAppConfig:
         config = AppConfig()
         assert config.trader_selection.min_pnl == 10000
         assert config.trader_selection.min_win_rate == 0.55
-        assert config.trader_selection.min_trades == 50
-        assert config.trader_selection.half_life_days == 14.0
+        assert config.trader_selection.min_trades == 150  # M12: raised from 50
+        assert config.trader_selection.half_life_days == 7.0  # L4: faster recency decay
         assert config.trader_selection.max_top_traders == 5
+        # Chunk 2 (H14/H15/H16) trader-selection quality knobs
+        assert config.trader_selection.sharpe_cap == 3.0
+        assert config.trader_selection.sharpe_shrink_min_trades == 20
+        assert config.trader_selection.min_expectancy == 0.01
+        assert config.trader_selection.recent_window_days == 30
+
+    def test_chunk3_risk_refinement_fields(self):
+        # Chunk 3 (M9/L5) risk-refinement knobs
+        config = AppConfig()
+        assert config.copy_trading.max_positions_per_token == 3  # M9
+        assert config.risk_management.low_entry_threshold == 0.20  # L5
+        assert config.risk_management.low_entry_tp_fraction == 0.25  # L5
+
+    def test_chunk4_execution_quality_fields(self):
+        # Chunk 4 (H17/M1/M5) execution-quality knobs
+        config = AppConfig()
+        assert config.poll_jitter_seconds == 2.0  # H17
+        assert config.copy_trading.revalidate_edge_before_order is True  # M1
+        assert config.copy_trading.entry_order_type == "FOK"  # M5
+        assert config.copy_trading.exit_order_type == "FAK"  # M5
+
+    def test_invalid_order_type_rejected(self):
+        # M5: order types are typed as the CLOB's Literal set; bad values are rejected.
+        from pydantic import ValidationError
+
+        with pytest.raises(ValidationError):
+            AppConfig(copy_trading={"entry_order_type": "BOGUS"})
+
+    def test_chunk6_kelly_execution_fields(self):
+        # Chunk 6 (H18/M3/M4/M11/M12) knobs and their new defaults.
+        config = AppConfig()
+        assert config.copy_trading.kelly_min_trades == 50  # M3
+        assert config.copy_trading.kelly_edge_shrink == 0.5  # H18
+        assert config.copy_trading.kelly_max_edge == 0.20  # H18
+        assert config.copy_trading.tracker_prior_decay_enabled is True  # M4
+        assert config.copy_trading.slippage_size_threshold_usdc == 500.0  # M11
+        assert config.copy_trading.slippage_size_coeff == 0.5  # M11
+        assert config.copy_trading.slippage_size_max_mult == 3.0  # M11
+        assert config.copy_trading.live_order_timeout_seconds == 8.0  # M12
+        assert config.copy_trading.live_retry_slippage_pct == 0.02  # M12
+        assert config.copy_trading.live_order_max_retries == 1  # M12
+
+    def test_live_retry_slippage_validator(self):
+        # M12: retry slippage must be >= base cap and <= 0.05 ceiling; retries in {0,1}.
+        from pydantic import ValidationError
+
+        with pytest.raises(ValidationError):
+            AppConfig(copy_trading={"max_live_slippage_pct": 0.03, "live_retry_slippage_pct": 0.01})
+        with pytest.raises(ValidationError):
+            AppConfig(copy_trading={"live_retry_slippage_pct": 0.10})  # > 0.05 ceiling
+        with pytest.raises(ValidationError):
+            AppConfig(copy_trading={"live_order_max_retries": 2})

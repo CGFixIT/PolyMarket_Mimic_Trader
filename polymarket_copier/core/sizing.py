@@ -25,9 +25,22 @@ before trusting an observed win rate.
 
 A non-positive ``f*`` means there is no edge at this price; we never bet in that
 case (return 0).
+
+EDGE-BASED SIZING (H18)
+-----------------------
+Passing a trader's observed WIN RATE in as ``p`` is wrong: for a binary token
+paying $1 the market-implied probability is the price itself, so a favorite-buyer
+(high win rate, ~zero edge) gets oversized. The correct ``p`` is
+``clamp(price + edge, 0, 1)`` where ``edge`` is the trader's DEMONSTRATED
+probability edge. From E[ROI] = edge / price (buying 1 share at ``price`` that
+pays $1 with probability ``p = price + edge``), the natural conversion is
+``edge = mean_roi * price``. ``edge_to_win_prob`` / ``kelly_size_from_edge``
+implement this and reuse ``kelly_fraction`` / ``kelly_size_usdc`` unchanged.
 """
 
 from __future__ import annotations
+
+import math
 
 
 def kelly_fraction(win_prob: float, price: float) -> float:
@@ -82,3 +95,61 @@ def kelly_size_usdc(
     raw = bankroll * f_star * kelly_multiplier
     cap = bankroll * max_pct
     return max(0.0, min(raw, cap))
+
+
+def roi_to_edge(mean_roi: float, price: float) -> float:
+    """Convert a trader's mean per-trade ROI fraction to a raw probability edge (H18).
+
+    Derived from E[ROI] = edge / price for a binary $1 token bought at ``price``:
+    ``edge = max(0, mean_roi) * price``. Negative/zero ROI (no demonstrated skill)
+    yields 0 edge. Returns 0.0 for a degenerate price or non-finite ROI.
+    """
+    if not (0.0 < price < 1.0) or not math.isfinite(mean_roi):
+        return 0.0
+    return max(0.0, mean_roi) * price
+
+
+def edge_to_win_prob(
+    edge: float,
+    price: float,
+    *,
+    edge_shrink: float = 1.0,
+    max_edge: float = 0.20,
+) -> float:
+    """Convert a probability edge into a Kelly win-prob ``p = clamp(price + edge, 0, 1)`` (H18).
+
+    ``edge`` is in probability points (same units as price). It is floored at 0,
+    scaled by the conservative ``edge_shrink`` (Kelly punishes overestimated edge),
+    and capped at ``max_edge`` so one lucky high-ROI sample can't push ``p`` to an
+    extreme. Returns 0.0 for a degenerate price or non-finite edge.
+    """
+    if not (0.0 < price < 1.0) or not math.isfinite(edge):
+        return 0.0
+    e = max(0.0, edge) * max(0.0, edge_shrink)
+    e = min(e, max_edge)
+    p = price + e
+    return min(1.0, max(0.0, p))
+
+
+def kelly_size_from_edge(
+    edge: float,
+    price: float,
+    bankroll: float,
+    kelly_multiplier: float = 0.25,
+    max_pct: float = 0.02,
+    *,
+    edge_shrink: float = 1.0,
+    max_edge: float = 0.20,
+) -> float:
+    """Size a copy trade from a probability edge using fractional Kelly (H18).
+
+    Computes ``p = clamp(price + shrunk_capped_edge, 0, 1)`` then delegates to
+    ``kelly_size_usdc`` (reusing the existing Kelly math). A non-positive edge gives
+    ``p <= price`` → no edge → 0 size. Returns 0.0 on any degenerate input.
+    """
+    if bankroll <= 0.0 or kelly_multiplier <= 0.0 or max_pct <= 0.0:
+        return 0.0
+    p = edge_to_win_prob(edge, price, edge_shrink=edge_shrink, max_edge=max_edge)
+    if p <= 0.0:
+        return 0.0
+    return kelly_size_usdc(p, price, bankroll, kelly_multiplier, max_pct)

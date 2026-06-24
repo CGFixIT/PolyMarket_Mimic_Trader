@@ -70,6 +70,7 @@ class PortfolioManager:
         self._db: Optional[aiosqlite.Connection] = None
 
     async def init(self) -> None:
+        """Open the SQLite connection, enable WAL mode, and create the schema if absent."""
         os.makedirs(os.path.dirname(self._db_path) or ".", exist_ok=True)
         self._db = await aiosqlite.connect(self._db_path)
         await self._db.execute("PRAGMA journal_mode=WAL;")
@@ -78,6 +79,7 @@ class PortfolioManager:
         logger.info("Portfolio DB initialized: %s", self._db_path)
 
     async def close(self) -> None:
+        """Close the underlying SQLite connection if it is open."""
         if self._db:
             await self._db.close()
 
@@ -89,34 +91,51 @@ class PortfolioManager:
         gives no hint about the real cause (a missing ``await portfolio.init()``).
         """
         if self._db is None:
-            raise RuntimeError(
-                "PortfolioManager is not initialized. "
-                "Call `await portfolio.init()` before using it."
-            )
+            raise RuntimeError("PortfolioManager is not initialized. Call `await portfolio.init()` before using it.")
         return self._db
 
     async def open_position(self, pos: Position) -> None:
+        """Insert a new open position row into the positions table and commit."""
         db = self._require_db()
         await db.execute(
             """INSERT INTO positions
                (position_id, market_id, token_id, trader_address, entry_price,
                 tp_price, sl_price, peak_price, size_shares, entry_time, resolve_time, status)
                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'open')""",
-            (pos.position_id, pos.market_id, pos.token_id, pos.trader_address,
-             pos.entry_price, pos.tp_price, pos.sl_price, pos.peak_price,
-             pos.size_shares, pos.entry_time, pos.resolve_time),
+            (
+                pos.position_id,
+                pos.market_id,
+                pos.token_id,
+                pos.trader_address,
+                pos.entry_price,
+                pos.tp_price,
+                pos.sl_price,
+                pos.peak_price,
+                pos.size_shares,
+                pos.entry_time,
+                pos.resolve_time,
+            ),
         )
         await db.commit()
         logger.info("Position opened in DB: %s", pos.position_id)
 
     async def close_position(
-        self, position_id: str, exit_price: float, reason: ExitReason,
-    ) -> float:
+        self,
+        position_id: str,
+        exit_price: float,
+        reason: ExitReason,
+    ) -> Optional[float]:
+        """Mark a position closed (guarded against double-close), record a tax lot, and return realized PnL.
+
+        Returns the realized PnL (float, possibly 0.0 on a genuine break-even) on success,
+        or None if the position was not found or was already closed by a concurrent exit.
+        Callers must treat None as "already handled" and skip record_exit / metrics.
+        """
         db = self._require_db()
         pos = await self.get_position(position_id)
         if pos is None:
             logger.warning("Position %s not found for closing", position_id)
-            return 0.0
+            return None
         pnl = pos.pnl_at(exit_price)
         closed_at = time.time()
         # C4 guard: `AND status='open'` makes this UPDATE a no-op if another
@@ -129,10 +148,8 @@ class PortfolioManager:
             (exit_price, reason.name, pnl, closed_at, position_id),
         )
         if cur.rowcount != 1:
-            logger.warning(
-                "Position %s already closed — double-exit race prevented", position_id
-            )
-            return 0.0
+            logger.warning("Position %s already closed — double-exit race prevented", position_id)
+            return None
         # Record an immutable tax lot in the SAME transaction as the close, so the
         # ledger can never drift from the positions table.
         cost_basis = pos.entry_price * pos.size_shares
@@ -145,9 +162,19 @@ class PortfolioManager:
                 proceeds, realized_pnl, acquired_at, disposed_at,
                 holding_seconds, term)
                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-            (position_id, pos.token_id, pos.trader_address, pos.size_shares,
-             cost_basis, proceeds, pnl, pos.entry_time, closed_at,
-             holding_seconds, term),
+            (
+                position_id,
+                pos.token_id,
+                pos.trader_address,
+                pos.size_shares,
+                cost_basis,
+                proceeds,
+                pnl,
+                pos.entry_time,
+                closed_at,
+                holding_seconds,
+                term,
+            ),
         )
         await db.commit()
         logger.info("Position closed: %s reason=%s pnl=%.4f", position_id, reason.name, pnl)
@@ -191,26 +218,25 @@ class PortfolioManager:
         }
 
     async def get_open_positions(self) -> List[Position]:
+        """Return all positions whose status is 'open'."""
         db = self._require_db()
         cursor = await db.execute("SELECT * FROM positions WHERE status='open'")
         rows = await cursor.fetchall()
         return [_row_to_position(row) for row in rows]
 
     async def get_position(self, position_id: str) -> Optional[Position]:
+        """Return the position with the given id, or None if not found."""
         db = self._require_db()
-        cursor = await db.execute(
-            "SELECT * FROM positions WHERE position_id=?", (position_id,)
-        )
+        cursor = await db.execute("SELECT * FROM positions WHERE position_id=?", (position_id,))
         row = await cursor.fetchone()
         if row is None:
             return None
         return _row_to_position(row)
 
     async def get_position_by_token(self, token_id: str) -> Optional[Position]:
+        """Return a single open position for the given token id, or None if none exists."""
         db = self._require_db()
-        cursor = await db.execute(
-            "SELECT * FROM positions WHERE token_id=? AND status='open'", (token_id,)
-        )
+        cursor = await db.execute("SELECT * FROM positions WHERE token_id=? AND status='open'", (token_id,))
         row = await cursor.fetchone()
         if row is None:
             return None
@@ -226,21 +252,19 @@ class PortfolioManager:
         avoid orphaning the second (and beyond) position on a shared token.
         """
         db = self._require_db()
-        cursor = await db.execute(
-            "SELECT * FROM positions WHERE token_id=? AND status='open'", (token_id,)
-        )
+        cursor = await db.execute("SELECT * FROM positions WHERE token_id=? AND status='open'", (token_id,))
         rows = await cursor.fetchall()
         return [_row_to_position(row) for row in rows]
 
     async def position_count(self) -> int:
+        """Return the number of currently open positions."""
         db = self._require_db()
-        cursor = await db.execute(
-            "SELECT COUNT(*) FROM positions WHERE status='open'"
-        )
+        cursor = await db.execute("SELECT COUNT(*) FROM positions WHERE status='open'")
         row = await cursor.fetchone()
         return row[0] if row else 0
 
     async def update_peak_price(self, position_id: str, peak_price: float) -> None:
+        """Update the stored peak_price for a position (used for trailing-stop tracking)."""
         db = self._require_db()
         await db.execute(
             "UPDATE positions SET peak_price=? WHERE position_id=?",
@@ -248,11 +272,34 @@ class PortfolioManager:
         )
         await db.commit()
 
+    async def batch_update_peak_prices(self, updates: dict) -> None:
+        """Update peak_price for multiple positions in a single transaction (H11 debounced flush).
+
+        Accepts a dict of {position_id: new_peak_price}. A single commit amortises
+        the SQLite I/O cost so the per-tick hot path writes zero bytes to disk.
+        """
+        if not updates:
+            return
+        db = self._require_db()
+        for position_id, peak in updates.items():
+            await db.execute(
+                "UPDATE positions SET peak_price=? WHERE position_id=?",
+                (peak, position_id),
+            )
+        await db.commit()
+
+    async def get_open_unrealized_pnl_conservative(self) -> float:
+        """Return sum of (sl_price - entry_price)*size_shares for all open positions.
+        This is always <= 0 and represents the maximum realizable loss if all stops
+        are hit — a conservative mark-to-market for the daily-loss breaker."""
+        positions = await self.get_open_positions()
+        return sum(pos.pnl_at(pos.sl_price) for pos in positions)
+
     async def get_trader_pnl(self, trader_address: str) -> float:
+        """Return the summed realized PnL of all closed positions copied from a trader."""
         db = self._require_db()
         cursor = await db.execute(
-            "SELECT COALESCE(SUM(realized_pnl), 0) FROM positions "
-            "WHERE trader_address=? AND status='closed'",
+            "SELECT COALESCE(SUM(realized_pnl), 0) FROM positions WHERE trader_address=? AND status='closed'",
             (trader_address,),
         )
         row = await cursor.fetchone()
@@ -280,6 +327,7 @@ class PortfolioManager:
         return wins / total, total
 
     async def summary(self) -> str:
+        """Return a formatted text summary of open count, closed trades, win rate, and realized PnL."""
         db = self._require_db()
         open_count = await self.position_count()
         cursor = await db.execute(
@@ -288,9 +336,9 @@ class PortfolioManager:
             "FROM positions WHERE status='closed'"
         )
         row = await cursor.fetchone()
-        total    = row[0] if row else 0
+        total = row[0] if row else 0
         realized = row[1] if row else 0
-        wins     = row[2] if row and row[2] is not None else 0
+        wins = row[2] if row and row[2] is not None else 0
         wr = (wins / total * 100) if total > 0 else 0
         return (
             "=== Portfolio Summary ===\n"

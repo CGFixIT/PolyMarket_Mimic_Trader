@@ -20,13 +20,23 @@ def sample_activity() -> list[dict]:
     """A round-trip BUY then SELL on the same market/token (a winning trade)."""
     return [
         {
-            "id": "t1", "type": "trade", "side": "BUY",
-            "market": "mkt-a", "asset": "tok-a",
-            "price": "0.50", "size": "100", "timestamp": 1_700_000_000,
+            "id": "t1",
+            "type": "trade",
+            "side": "BUY",
+            "market": "mkt-a",
+            "asset": "tok-a",
+            "price": "0.50",
+            "size": "100",
+            "timestamp": 1_700_000_000,
         },
         {
-            "id": "t2", "type": "trade", "side": "SELL",
-            "market": "mkt-a", "asset": "tok-a",
-            "price": "0.65", "size": "65", "timestamp": 1_700_001_000,
+            "id": "t2",
+            "type": "trade",
+            "side": "SELL",
+            "market": "mkt-a",
+            "asset": "tok-a",
+            "price": "0.65",
+            "size": "65",
+            "timestamp": 1_700_001_000,
         },
     ]

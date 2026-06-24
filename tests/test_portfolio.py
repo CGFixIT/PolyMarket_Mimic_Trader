@@ -12,9 +12,7 @@ from polymarket_copier.core.risk_manager import ExitReason, RiskConfig, RiskMana
 def rm() -> RiskManager:
     # max_trader_allocation=1.0 keeps the per-trader cap out of these tests, which
     # exercise portfolio persistence, not the allocation control (tested elsewhere).
-    return RiskManager(
-        config=RiskConfig(max_trader_allocation=1.0), bankroll=10_000.0
-    )
+    return RiskManager(config=RiskConfig(max_trader_allocation=1.0), bankroll=10_000.0)
 
 
 @pytest.fixture
@@ -66,12 +64,20 @@ class TestPortfolioManager:
         # must be returned so per-tick exit evaluation never orphans the second.
         shared = "tok-shared"
         pos_a = await rm.build_position(
-            position_id="pos-a", market_id="mkt-a", token_id=shared,
-            trader_address="0xA", entry_price=0.50, size_shares=100.0,
+            position_id="pos-a",
+            market_id="mkt-a",
+            token_id=shared,
+            trader_address="0xA",
+            entry_price=0.50,
+            size_shares=100.0,
         )
         pos_b = await rm.build_position(
-            position_id="pos-b", market_id="mkt-a", token_id=shared,
-            trader_address="0xB", entry_price=0.50, size_shares=100.0,
+            position_id="pos-b",
+            market_id="mkt-a",
+            token_id=shared,
+            trader_address="0xB",
+            entry_price=0.50,
+            size_shares=100.0,
         )
         await portfolio.open_position(pos_a)
         await portfolio.open_position(pos_b)
@@ -94,7 +100,21 @@ class TestPortfolioManager:
     @pytest.mark.asyncio
     async def test_close_nonexistent(self, portfolio):
         pnl = await portfolio.close_position("ghost", 0.5, ExitReason.STOP_LOSS)
-        assert pnl == 0.0
+        assert pnl is None
+
+    @pytest.mark.asyncio
+    async def test_close_position_break_even(self, portfolio, rm):
+        """A genuine break-even close (exit_price == entry_price) returns 0.0, NOT None.
+        This distinguishes it from the already-closed sentinel (None) so record_exit
+        and metrics are still called for a real (if flat) trade outcome.
+        """
+        pos = await make_position(rm, entry=0.50, size=100.0)
+        await portfolio.open_position(pos)
+        pnl = await portfolio.close_position(pos.position_id, 0.50, ExitReason.STOP_LOSS)
+        assert pnl == pytest.approx(0.0)  # flat PnL — not None
+        assert await portfolio.position_count() == 0
+        report = await portfolio.realized_pnl_report()
+        assert report["disposals"] == 1  # tax lot must be recorded
 
     @pytest.mark.asyncio
     async def test_get_open_positions(self, portfolio, rm):
@@ -118,7 +138,7 @@ class TestPortfolioManager:
         await portfolio.open_position(pos1)
         await portfolio.open_position(pos2)
         await portfolio.close_position(pos1.position_id, 0.60, ExitReason.TAKE_PROFIT)  # +100
-        await portfolio.close_position(pos2.position_id, 0.45, ExitReason.STOP_LOSS)    # -50
+        await portfolio.close_position(pos2.position_id, 0.45, ExitReason.STOP_LOSS)  # -50
         total = await portfolio.get_trader_pnl("0xwhale")
         assert total == pytest.approx(50.0)
 
@@ -133,7 +153,7 @@ class TestPortfolioManager:
         await portfolio.open_position(pos3)
         await portfolio.close_position(pos1.position_id, 0.60, ExitReason.TAKE_PROFIT)  # win
         await portfolio.close_position(pos2.position_id, 0.70, ExitReason.TAKE_PROFIT)  # win
-        await portfolio.close_position(pos3.position_id, 0.40, ExitReason.STOP_LOSS)    # loss
+        await portfolio.close_position(pos3.position_id, 0.40, ExitReason.STOP_LOSS)  # loss
         win_rate, sample = await portfolio.get_trader_win_rate("0xw")
         assert sample == 3
         assert win_rate == pytest.approx(2 / 3)
@@ -200,16 +220,16 @@ class TestUninitializedGuard:
 
 class TestDoubleExitGuard:
     """C4: close_position must be idempotent — a second call on an already-closed
-    position returns 0.0 and does NOT insert a second realized-lot row."""
+    position returns None and does NOT insert a second realized-lot row."""
 
     @pytest.mark.asyncio
-    async def test_second_close_returns_zero(self, portfolio, rm):
+    async def test_second_close_returns_none(self, portfolio, rm):
         pos = await make_position(rm, entry=0.50, size=100.0)
         await portfolio.open_position(pos)
         pnl1 = await portfolio.close_position(pos.position_id, 0.60, ExitReason.TAKE_PROFIT)
         pnl2 = await portfolio.close_position(pos.position_id, 0.60, ExitReason.TAKE_PROFIT)
         assert pnl1 == pytest.approx(10.0)
-        assert pnl2 == 0.0  # race guard: already closed
+        assert pnl2 is None  # race guard: already closed → None sentinel
 
     @pytest.mark.asyncio
     async def test_second_close_does_not_add_extra_lot(self, portfolio, rm):
@@ -225,14 +245,17 @@ class TestDoubleExitGuard:
     async def test_concurrent_closes_produce_one_lot(self, portfolio, rm):
         """Simulates a race: two coroutines calling close_position concurrently."""
         import asyncio as _asyncio
+
         pos = await make_position(rm, entry=0.50, size=100.0)
         await portfolio.open_position(pos)
         pnls = await _asyncio.gather(
             portfolio.close_position(pos.position_id, 0.60, ExitReason.TAKE_PROFIT),
             portfolio.close_position(pos.position_id, 0.60, ExitReason.TAKE_PROFIT),
         )
-        # Exactly one winner; the other returns 0.0.
-        assert sorted(pnls) == pytest.approx([0.0, 10.0])
+        # Exactly one winner (10.0 PnL); the loser returns None (race guard).
+        non_none = [p for p in pnls if p is not None]
+        assert len(non_none) == 1
+        assert non_none[0] == pytest.approx(10.0)
         report = await portfolio.realized_pnl_report()
         assert report["disposals"] == 1
 
@@ -250,8 +273,8 @@ class TestRealizedPnlLedger:
 
         report = await portfolio.realized_pnl_report()
         assert report["disposals"] == 1
-        assert report["proceeds"] == pytest.approx(65.0)       # 0.65 * 100
-        assert report["cost_basis"] == pytest.approx(50.0)     # 0.50 * 100
+        assert report["proceeds"] == pytest.approx(65.0)  # 0.65 * 100
+        assert report["cost_basis"] == pytest.approx(50.0)  # 0.50 * 100
         assert report["net_realized_pnl"] == pytest.approx(15.0)
         # A just-opened position is short-term.
         assert report["short_term_pnl"] == pytest.approx(15.0)
@@ -263,8 +286,8 @@ class TestRealizedPnlLedger:
         loss = await make_position(rm, entry=0.60, market_id="mkt-l", size=100.0)
         await portfolio.open_position(win)
         await portfolio.open_position(loss)
-        await portfolio.close_position(win.position_id, 0.55, ExitReason.TAKE_PROFIT)   # +15
-        await portfolio.close_position(loss.position_id, 0.50, ExitReason.STOP_LOSS)    # -10
+        await portfolio.close_position(win.position_id, 0.55, ExitReason.TAKE_PROFIT)  # +15
+        await portfolio.close_position(loss.position_id, 0.50, ExitReason.STOP_LOSS)  # -10
 
         report = await portfolio.realized_pnl_report()
         assert report["disposals"] == 2

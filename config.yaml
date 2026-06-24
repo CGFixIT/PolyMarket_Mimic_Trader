@@ -1,5 +1,9 @@
 mode: paper
 polling_interval_seconds: 8
+poll_jitter_seconds: 2.0          # H17: randomize poll cadence (front-run resistance; 0 disables)
+metrics_enabled: false            # M16: expose Prometheus metrics (no-op if prometheus-client absent)
+metrics_port: 9090                # M16: scrape endpoint port
+metrics_refresh_seconds: 5.0      # M16: gauge refresh interval
 
 trader_selection:
   min_pnl: 10000
@@ -15,6 +19,16 @@ copy_trading:
   max_trader_allocation: 0.05
   max_price_deviation: 0.02
   max_concurrent_positions: 10
+  max_positions_per_token: 3      # M9: cap copies on one token (0 disables)
+  revalidate_edge_before_order: true  # M1: re-check price after lock; skip if edge collapsed
+  entry_order_type: FOK           # M5: all-or-nothing immediate entry fill
+  exit_order_type: FAK            # M5: take available liquidity now on exit
+  live_order_timeout_seconds: 8.0   # M12: resting (GTC/GTD) live order timeout; 0 disables
+  live_retry_slippage_pct: 0.02     # M12: wider cap for the single retry (>= base, <= 0.05)
+  live_order_max_retries: 1         # M12: retry at most once after a confirmed non-fill
+  slippage_size_threshold_usdc: 500.0  # M11: above this notional, slippage scales with size
+  slippage_size_coeff: 0.5             # M11: sqrt-impact strength (0 disables scaling)
+  slippage_size_max_mult: 3.0          # M11: cap on the size multiplier
   min_market_volume: 5000
   max_trade_age_seconds: 12
   mirror_source_exits: true
@@ -22,11 +36,13 @@ copy_trading:
   paper_taker_fee_pct: 0.02
   kelly_enabled: false
   kelly_fraction_multiplier: 0.25
-  kelly_min_trades: 20
+  kelly_min_trades: 50            # M3: raised 20 -> 50 so early luck can't oversize
 
 risk_management:
   tp_range_fraction: 0.40
   sl_range_fraction: 0.25
+  low_entry_threshold: 0.20       # L5: below this entry, taper the TP fraction
+  low_entry_tp_fraction: 0.25     # L5: TP fraction floor at the price floor
   min_tp_abs: 0.03
   min_sl_abs: 0.02
   trailing_stop_fraction: 0.15

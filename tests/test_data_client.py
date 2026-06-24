@@ -37,9 +37,7 @@ class TestDataClient:
     async def test_get_leaderboard_params(self, data_client):
         with patch.object(data_client, "_get", new_callable=AsyncMock, return_value=[]) as mock_get:
             await data_client.get_leaderboard(limit=10)
-            mock_get.assert_called_once_with(
-                "/leaderboard", params={"window": "all", "limit": 10}
-            )
+            mock_get.assert_called_once_with("/leaderboard", params={"window": "all", "limit": 10})
 
     @pytest.mark.asyncio
     async def test_get_wallet_activity(self, data_client):
@@ -52,9 +50,7 @@ class TestDataClient:
     async def test_get_wallet_activity_params(self, data_client):
         with patch.object(data_client, "_get", new_callable=AsyncMock, return_value=[]) as mock_get:
             await data_client.get_wallet_activity("0xabc", limit=50)
-            mock_get.assert_called_once_with(
-                "/activity", params={"user": "0xabc", "limit": 50}
-            )
+            mock_get.assert_called_once_with("/activity", params={"user": "0xabc", "limit": 50})
 
     @pytest.mark.asyncio
     async def test_close_external_session_not_closed(self):

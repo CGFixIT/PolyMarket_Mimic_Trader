@@ -39,6 +39,7 @@ class GammaClient:
         self._session_lock = asyncio.Lock()
 
     async def _get_session(self) -> aiohttp.ClientSession:
+        """Return the shared aiohttp session, lazily creating it under a lock to avoid orphaned sessions."""
         # Fast path: an open session already exists, no lock needed.
         if self._session is not None and not self._session.closed:
             return self._session
@@ -47,13 +48,12 @@ class GammaClient:
             if self._session is None or self._session.closed:
                 self._session = aiohttp.ClientSession(
                     timeout=aiohttp.ClientTimeout(total=10),
-                    connector=aiohttp.TCPConnector(
-                        limit=_CONN_LIMIT, keepalive_timeout=_KEEPALIVE_TIMEOUT
-                    ),
+                    connector=aiohttp.TCPConnector(limit=_CONN_LIMIT, keepalive_timeout=_KEEPALIVE_TIMEOUT),
                 )
         return self._session
 
     async def close(self) -> None:
+        """Close the aiohttp session unless it was supplied externally by the caller."""
         if self._session and not self._external_session:
             await self._session.close()
 
@@ -108,9 +108,9 @@ class GammaClient:
                     price = float(raw)
                     if not (0.0 <= price <= 1.0):
                         logger.warning(
-                            "Rejecting out-of-range price %.6f for token %s "
-                            "(Polymarket tokens are bounded in [0, 1])",
-                            price, token_id[:10],
+                            "Rejecting out-of-range price %.6f for token %s (Polymarket tokens are bounded in [0, 1])",
+                            price,
+                            token_id[:10],
                         )
                         return None
                     return price
