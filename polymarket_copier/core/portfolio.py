@@ -91,10 +91,7 @@ class PortfolioManager:
         gives no hint about the real cause (a missing ``await portfolio.init()``).
         """
         if self._db is None:
-            raise RuntimeError(
-                "PortfolioManager is not initialized. "
-                "Call `await portfolio.init()` before using it."
-            )
+            raise RuntimeError("PortfolioManager is not initialized. Call `await portfolio.init()` before using it.")
         return self._db
 
     async def open_position(self, pos: Position) -> None:
@@ -105,15 +102,28 @@ class PortfolioManager:
                (position_id, market_id, token_id, trader_address, entry_price,
                 tp_price, sl_price, peak_price, size_shares, entry_time, resolve_time, status)
                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'open')""",
-            (pos.position_id, pos.market_id, pos.token_id, pos.trader_address,
-             pos.entry_price, pos.tp_price, pos.sl_price, pos.peak_price,
-             pos.size_shares, pos.entry_time, pos.resolve_time),
+            (
+                pos.position_id,
+                pos.market_id,
+                pos.token_id,
+                pos.trader_address,
+                pos.entry_price,
+                pos.tp_price,
+                pos.sl_price,
+                pos.peak_price,
+                pos.size_shares,
+                pos.entry_time,
+                pos.resolve_time,
+            ),
         )
         await db.commit()
         logger.info("Position opened in DB: %s", pos.position_id)
 
     async def close_position(
-        self, position_id: str, exit_price: float, reason: ExitReason,
+        self,
+        position_id: str,
+        exit_price: float,
+        reason: ExitReason,
     ) -> Optional[float]:
         """Mark a position closed (guarded against double-close), record a tax lot, and return realized PnL.
 
@@ -138,9 +148,7 @@ class PortfolioManager:
             (exit_price, reason.name, pnl, closed_at, position_id),
         )
         if cur.rowcount != 1:
-            logger.warning(
-                "Position %s already closed — double-exit race prevented", position_id
-            )
+            logger.warning("Position %s already closed — double-exit race prevented", position_id)
             return None
         # Record an immutable tax lot in the SAME transaction as the close, so the
         # ledger can never drift from the positions table.
@@ -154,9 +162,19 @@ class PortfolioManager:
                 proceeds, realized_pnl, acquired_at, disposed_at,
                 holding_seconds, term)
                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-            (position_id, pos.token_id, pos.trader_address, pos.size_shares,
-             cost_basis, proceeds, pnl, pos.entry_time, closed_at,
-             holding_seconds, term),
+            (
+                position_id,
+                pos.token_id,
+                pos.trader_address,
+                pos.size_shares,
+                cost_basis,
+                proceeds,
+                pnl,
+                pos.entry_time,
+                closed_at,
+                holding_seconds,
+                term,
+            ),
         )
         await db.commit()
         logger.info("Position closed: %s reason=%s pnl=%.4f", position_id, reason.name, pnl)
@@ -209,9 +227,7 @@ class PortfolioManager:
     async def get_position(self, position_id: str) -> Optional[Position]:
         """Return the position with the given id, or None if not found."""
         db = self._require_db()
-        cursor = await db.execute(
-            "SELECT * FROM positions WHERE position_id=?", (position_id,)
-        )
+        cursor = await db.execute("SELECT * FROM positions WHERE position_id=?", (position_id,))
         row = await cursor.fetchone()
         if row is None:
             return None
@@ -220,9 +236,7 @@ class PortfolioManager:
     async def get_position_by_token(self, token_id: str) -> Optional[Position]:
         """Return a single open position for the given token id, or None if none exists."""
         db = self._require_db()
-        cursor = await db.execute(
-            "SELECT * FROM positions WHERE token_id=? AND status='open'", (token_id,)
-        )
+        cursor = await db.execute("SELECT * FROM positions WHERE token_id=? AND status='open'", (token_id,))
         row = await cursor.fetchone()
         if row is None:
             return None
@@ -238,18 +252,14 @@ class PortfolioManager:
         avoid orphaning the second (and beyond) position on a shared token.
         """
         db = self._require_db()
-        cursor = await db.execute(
-            "SELECT * FROM positions WHERE token_id=? AND status='open'", (token_id,)
-        )
+        cursor = await db.execute("SELECT * FROM positions WHERE token_id=? AND status='open'", (token_id,))
         rows = await cursor.fetchall()
         return [_row_to_position(row) for row in rows]
 
     async def position_count(self) -> int:
         """Return the number of currently open positions."""
         db = self._require_db()
-        cursor = await db.execute(
-            "SELECT COUNT(*) FROM positions WHERE status='open'"
-        )
+        cursor = await db.execute("SELECT COUNT(*) FROM positions WHERE status='open'")
         row = await cursor.fetchone()
         return row[0] if row else 0
 
@@ -273,8 +283,7 @@ class PortfolioManager:
         """Return the summed realized PnL of all closed positions copied from a trader."""
         db = self._require_db()
         cursor = await db.execute(
-            "SELECT COALESCE(SUM(realized_pnl), 0) FROM positions "
-            "WHERE trader_address=? AND status='closed'",
+            "SELECT COALESCE(SUM(realized_pnl), 0) FROM positions WHERE trader_address=? AND status='closed'",
             (trader_address,),
         )
         row = await cursor.fetchone()
@@ -311,9 +320,9 @@ class PortfolioManager:
             "FROM positions WHERE status='closed'"
         )
         row = await cursor.fetchone()
-        total    = row[0] if row else 0
+        total = row[0] if row else 0
         realized = row[1] if row else 0
-        wins     = row[2] if row and row[2] is not None else 0
+        wins = row[2] if row and row[2] is not None else 0
         wr = (wins / total * 100) if total > 0 else 0
         return (
             "=== Portfolio Summary ===\n"

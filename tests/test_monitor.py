@@ -24,8 +24,13 @@ async def _noop_trade(event):
 class TestParseTradeEvent:
     def test_parse_buy(self):
         raw = {
-            "id": "t1", "side": "BUY", "market": "mkt-a", "asset": "tok-a",
-            "price": "0.65", "size": "100", "timestamp": 1_700_000_000,
+            "id": "t1",
+            "side": "BUY",
+            "market": "mkt-a",
+            "asset": "tok-a",
+            "price": "0.65",
+            "size": "100",
+            "timestamp": 1_700_000_000,
         }
         event = _parse_trade_event("0xabc", raw)
         assert event is not None
@@ -36,8 +41,13 @@ class TestParseTradeEvent:
 
     def test_parse_sell(self):
         raw = {
-            "id": "t2", "side": "SELL", "market": "mkt-a", "asset": "tok-a",
-            "price": "0.75", "size": "50", "timestamp": 1_700_000_000,
+            "id": "t2",
+            "side": "SELL",
+            "market": "mkt-a",
+            "asset": "tok-a",
+            "price": "0.75",
+            "size": "50",
+            "timestamp": 1_700_000_000,
         }
         event = _parse_trade_event("0xabc", raw)
         assert event.trade_type == TradeType.SELL
@@ -48,15 +58,24 @@ class TestParseTradeEvent:
 
     def test_zero_price_returns_none(self):
         raw = {
-            "id": "t1", "side": "BUY", "market": "m", "asset": "a",
-            "price": "0", "size": "10",
+            "id": "t1",
+            "side": "BUY",
+            "market": "m",
+            "asset": "a",
+            "price": "0",
+            "size": "10",
         }
         assert _parse_trade_event("0xabc", raw) is None
 
     def test_millis_timestamp_normalized(self):
         raw = {
-            "id": "t1", "side": "BUY", "market": "m", "asset": "a",
-            "price": "0.5", "size": "10", "timestamp": 1_700_000_000_000,
+            "id": "t1",
+            "side": "BUY",
+            "market": "m",
+            "asset": "a",
+            "price": "0.5",
+            "size": "10",
+            "timestamp": 1_700_000_000_000,
         }
         event = _parse_trade_event("0xabc", raw)
         assert event.timestamp == pytest.approx(1_700_000_000, abs=1)
@@ -69,7 +88,8 @@ class TestTradeMonitor:
 
     def test_lowercases_wallets(self):
         monitor = TradeMonitor(
-            tracked_wallets=["0xABCDEF"], on_trade=lambda e: None,
+            tracked_wallets=["0xABCDEF"],
+            on_trade=lambda e: None,
         )
         assert monitor._wallets == ["0xabcdef"]
 
@@ -116,9 +136,8 @@ class TestTradeMonitor:
         )
         monitor.subscribe_token("tok-a")
         import json
-        raw = json.dumps([
-            {"event_type": "price_change", "asset_id": "tok-a", "price": "0.55"}
-        ])
+
+        raw = json.dumps([{"event_type": "price_change", "asset_id": "tok-a", "price": "0.55"}])
         await monitor._handle_ws_message(raw)
         assert len(ticks) == 1
         assert isinstance(ticks[0], PriceTick)
@@ -137,9 +156,8 @@ class TestTradeMonitor:
             on_price=on_price,
         )
         import json
-        raw = json.dumps([
-            {"event_type": "price_change", "asset_id": "other-tok", "price": "0.55"}
-        ])
+
+        raw = json.dumps([{"event_type": "price_change", "asset_id": "other-tok", "price": "0.55"}])
         await monitor._handle_ws_message(raw)
         assert len(ticks) == 0
 
@@ -157,9 +175,8 @@ class TestTradeMonitor:
         )
         monitor.subscribe_token("tok-a")
         import json
-        raw = json.dumps([
-            {"event_type": "price_change", "asset_id": "tok-a", "price": "1.5"}
-        ])
+
+        raw = json.dumps([{"event_type": "price_change", "asset_id": "tok-a", "price": "1.5"}])
         await monitor._handle_ws_message(raw)
         assert len(ticks) == 0
 
@@ -195,7 +212,9 @@ class TestColdStartPriming:
 
     def test_prime_on_start_false_acts_immediately(self):
         monitor = TradeMonitor(
-            tracked_wallets=["0xabc"], on_trade=_noop_trade, prime_on_start=False,
+            tracked_wallets=["0xabc"],
+            on_trade=_noop_trade,
+            prime_on_start=False,
         )
         assert "0xabc" in monitor._primed_wallets
 
@@ -203,12 +222,11 @@ class TestColdStartPriming:
 class TestSeenEvictionFIFO:
     def test_oldest_ids_evicted_first(self):
         from polymarket_copier.core.monitor import _MAX_TRADES_PER_POLL
+
         monitor = TradeMonitor(tracked_wallets=["0xabc"], on_trade=_noop_trade)
         # Insert well over the 2x cap so eviction runs.
         n = _MAX_TRADES_PER_POLL * 2 + 10
-        activity = [
-            {"id": f"t{i}", "type": "trade", "side": "BUY"} for i in range(n)
-        ]
+        activity = [{"id": f"t{i}", "type": "trade", "side": "BUY"} for i in range(n)]
         monitor._filter_new_trades("0xabc", activity)
         seen = monitor._seen_trade_ids["0xabc"]
         # Size is bounded to the 2x cap.
@@ -220,6 +238,7 @@ class TestSeenEvictionFIFO:
 
 # ─── Latency instrumentation ──────────────────────────────────────────────────
 
+
 class TestTradeEventDetectedAt:
     """The detected_at field stamps each event with a monotonic clock reading
     at parse time, allowing copier.py to measure detection → order latency."""
@@ -227,9 +246,15 @@ class TestTradeEventDetectedAt:
     def test_detected_at_defaults_to_monotonic_now(self):
         before = time.monotonic()
         event = TradeEvent(
-            event_id="e1", wallet_address="0xw", market_id="m",
-            token_id="t", outcome_label="Yes", trade_type=TradeType.BUY,
-            price=0.5, size_usdc=100.0, timestamp=time.time(),
+            event_id="e1",
+            wallet_address="0xw",
+            market_id="m",
+            token_id="t",
+            outcome_label="Yes",
+            trade_type=TradeType.BUY,
+            price=0.5,
+            size_usdc=100.0,
+            timestamp=time.time(),
             transaction_hash="0xh",
         )
         after = time.monotonic()
@@ -237,17 +262,29 @@ class TestTradeEventDetectedAt:
 
     def test_detected_at_can_be_set_explicitly(self):
         event = TradeEvent(
-            event_id="e1", wallet_address="0xw", market_id="m",
-            token_id="t", outcome_label="Yes", trade_type=TradeType.BUY,
-            price=0.5, size_usdc=100.0, timestamp=time.time(),
-            transaction_hash="0xh", detected_at=42.0,
+            event_id="e1",
+            wallet_address="0xw",
+            market_id="m",
+            token_id="t",
+            outcome_label="Yes",
+            trade_type=TradeType.BUY,
+            price=0.5,
+            size_usdc=100.0,
+            timestamp=time.time(),
+            transaction_hash="0xh",
+            detected_at=42.0,
         )
         assert event.detected_at == 42.0
 
     def test_parse_trade_event_stamps_detected_at(self):
         raw = {
-            "id": "t1", "side": "BUY", "market": "mkt-a", "asset": "tok-a",
-            "price": "0.5", "size": "100", "timestamp": 1_700_000_000,
+            "id": "t1",
+            "side": "BUY",
+            "market": "mkt-a",
+            "asset": "tok-a",
+            "price": "0.5",
+            "size": "100",
+            "timestamp": 1_700_000_000,
         }
         before = time.monotonic()
         event = _parse_trade_event("0xabc", raw)
@@ -257,6 +294,7 @@ class TestTradeEventDetectedAt:
 
 
 # ─── Rate limiter on hot poll path ────────────────────────────────────────────
+
 
 class _FakeRespMonitor:
     def __init__(self, data):
@@ -284,14 +322,18 @@ class _FakeSessionMonitor:
 class TestRateLimiterOnPollPath:
     def test_default_rate_limiter_is_created(self):
         from aiolimiter import AsyncLimiter
+
         monitor = TradeMonitor(tracked_wallets=["0xabc"], on_trade=_noop_trade)
         assert isinstance(monitor._rate_limiter, AsyncLimiter)
 
     def test_injected_rate_limiter_is_stored(self):
         from aiolimiter import AsyncLimiter
+
         limiter = AsyncLimiter(50, 60)
         monitor = TradeMonitor(
-            tracked_wallets=["0xabc"], on_trade=_noop_trade, rate_limiter=limiter,
+            tracked_wallets=["0xabc"],
+            on_trade=_noop_trade,
+            rate_limiter=limiter,
         )
         assert monitor._rate_limiter is limiter
 
@@ -329,11 +371,18 @@ class TestRateLimiterOnPollPath:
             on_trade=capture,
             prime_on_start=False,
         )
-        data = [{
-            "id": "t1", "type": "trade", "side": "BUY",
-            "market": "mkt-a", "asset": "tok-a",
-            "price": "0.50", "size": "100", "timestamp": 1_700_000_000,
-        }]
+        data = [
+            {
+                "id": "t1",
+                "type": "trade",
+                "side": "BUY",
+                "market": "mkt-a",
+                "asset": "tok-a",
+                "price": "0.50",
+                "size": "100",
+                "timestamp": 1_700_000_000,
+            }
+        ]
         before = time.monotonic()
         await monitor._poll_wallet(_FakeSessionMonitor(data), "0xwhale")
         after = time.monotonic()
@@ -343,6 +392,7 @@ class TestRateLimiterOnPollPath:
 
 
 # ─── WebSocket Reconnect Fallback ─────────────────────────────────────────────
+
 
 class TestWsReconnectFallback:
     """H10: _ws_loop NEVER permanently exits — it retries indefinitely with capped backoff."""
@@ -455,6 +505,7 @@ class TestWsReconnectFallback:
 
 # ─── C5: set_wallets — rebalance without KeyError on new wallets ──────────────
 
+
 class TestSetWallets:
     """C5 fix: set_wallets() must initialise _seen_trade_ids for newly-added wallets
     so that their first poll primes the baseline rather than KeyError-ing out."""
@@ -483,11 +534,12 @@ class TestSetWallets:
         monitor._primed_wallets.add("0xold")
         monitor.set_wallets(["0xold", "0xnew"])
         assert "0xnew" not in monitor._primed_wallets  # new → not primed
-        assert "0xold" in monitor._primed_wallets      # existing priming retained
+        assert "0xold" in monitor._primed_wallets  # existing priming retained
 
     def test_set_wallets_preserves_seen_ids_for_retained_wallet(self):
         monitor = TradeMonitor(tracked_wallets=["0xold"], on_trade=_noop_trade)
         from collections import OrderedDict
+
         monitor._seen_trade_ids["0xold"]["tx-seen"] = None
         monitor.set_wallets(["0xold", "0xnew"])
         # Existing seen ids must survive — losing them causes duplicate detection.
@@ -506,6 +558,7 @@ class TestSetWallets:
 
 # ─── H17: Poll-cadence jitter (front-run resistance) ──────────────────────────
 
+
 class TestPollJitter:
     """H17: the poll cadence must be unpredictable so an observer can't time our
     detection and front-run the copy. _next_interval() adds bounded jitter and the
@@ -514,8 +567,10 @@ class TestPollJitter:
     def test_zero_jitter_returns_exact_interval(self):
         # poll_jitter=0 must be exactly periodic (legacy behaviour preserved).
         monitor = TradeMonitor(
-            tracked_wallets=["0xWHALE"], on_trade=_noop_trade,
-            poll_interval=8.0, poll_jitter=0.0,
+            tracked_wallets=["0xWHALE"],
+            on_trade=_noop_trade,
+            poll_interval=8.0,
+            poll_jitter=0.0,
         )
         for _ in range(20):
             assert monitor._next_interval() == 8.0
@@ -523,8 +578,11 @@ class TestPollJitter:
     def test_jitter_stays_within_bounds(self):
         # With jitter=2, every interval must lie in [interval-2, interval+2].
         monitor = TradeMonitor(
-            tracked_wallets=["0xWHALE"], on_trade=_noop_trade,
-            poll_interval=8.0, poll_jitter=2.0, jitter_seed=42,
+            tracked_wallets=["0xWHALE"],
+            on_trade=_noop_trade,
+            poll_interval=8.0,
+            poll_jitter=2.0,
+            jitter_seed=42,
         )
         samples = [monitor._next_interval() for _ in range(1000)]
         assert all(6.0 <= s <= 10.0 for s in samples)
@@ -534,8 +592,11 @@ class TestPollJitter:
     def test_jitter_mean_approximates_base_interval(self):
         # Symmetric jitter → mean stays close to the base interval (no systematic drift).
         monitor = TradeMonitor(
-            tracked_wallets=["0xWHALE"], on_trade=_noop_trade,
-            poll_interval=8.0, poll_jitter=2.0, jitter_seed=7,
+            tracked_wallets=["0xWHALE"],
+            on_trade=_noop_trade,
+            poll_interval=8.0,
+            poll_jitter=2.0,
+            jitter_seed=7,
         )
         samples = [monitor._next_interval() for _ in range(5000)]
         assert abs(sum(samples) / len(samples) - 8.0) < 0.15
@@ -544,8 +605,11 @@ class TestPollJitter:
         # Even with jitter larger than the interval, the floor protects against a
         # near-zero spin loop.
         monitor = TradeMonitor(
-            tracked_wallets=["0xWHALE"], on_trade=_noop_trade,
-            poll_interval=2.0, poll_jitter=10.0, jitter_seed=1,
+            tracked_wallets=["0xWHALE"],
+            on_trade=_noop_trade,
+            poll_interval=2.0,
+            poll_jitter=10.0,
+            jitter_seed=1,
         )
         samples = [monitor._next_interval() for _ in range(1000)]
         assert all(s >= 1.0 for s in samples)  # _MIN_POLL_FLOOR
@@ -553,12 +617,13 @@ class TestPollJitter:
     def test_seed_makes_jitter_deterministic(self):
         # Same seed → same sequence (reproducible tests, but still unpredictable
         # to an observer who doesn't know the seed; production uses seed=None).
-        m1 = TradeMonitor(tracked_wallets=["0xW"], on_trade=_noop_trade,
-                          poll_interval=8.0, poll_jitter=2.0, jitter_seed=99)
-        m2 = TradeMonitor(tracked_wallets=["0xW"], on_trade=_noop_trade,
-                          poll_interval=8.0, poll_jitter=2.0, jitter_seed=99)
-        assert [m1._next_interval() for _ in range(50)] == \
-               [m2._next_interval() for _ in range(50)]
+        m1 = TradeMonitor(
+            tracked_wallets=["0xW"], on_trade=_noop_trade, poll_interval=8.0, poll_jitter=2.0, jitter_seed=99
+        )
+        m2 = TradeMonitor(
+            tracked_wallets=["0xW"], on_trade=_noop_trade, poll_interval=8.0, poll_jitter=2.0, jitter_seed=99
+        )
+        assert [m1._next_interval() for _ in range(50)] == [m2._next_interval() for _ in range(50)]
 
     @pytest.mark.asyncio
     async def test_staggered_poll_still_fetches_all_wallets(self):
@@ -569,8 +634,11 @@ class TestPollJitter:
             return None
 
         monitor = TradeMonitor(
-            tracked_wallets=["0xA", "0xB", "0xC"], on_trade=capture_trade,
-            poll_jitter=0.01, jitter_seed=3, prime_on_start=False,
+            tracked_wallets=["0xA", "0xB", "0xC"],
+            on_trade=capture_trade,
+            poll_jitter=0.01,
+            jitter_seed=3,
+            prime_on_start=False,
         )
 
         async def fake_poll(session, wallet):

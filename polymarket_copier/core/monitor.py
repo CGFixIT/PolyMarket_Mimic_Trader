@@ -45,6 +45,7 @@ from aiolimiter import AsyncLimiter
 try:
     import websockets
     import websockets.exceptions  # noqa: F401
+
     _WS_AVAILABLE = True
 except ImportError:
     _WS_AVAILABLE = False
@@ -53,27 +54,29 @@ logger = logging.getLogger(__name__)
 
 # ─── Constants ────────────────────────────────────────────────────────────────
 
-POLYMARKET_WS_URL    = "wss://ws-subscriptions-clob.polymarket.com/ws/"
-POLYMARKET_DATA_API  = "https://data-api.polymarket.com"
+POLYMARKET_WS_URL = "wss://ws-subscriptions-clob.polymarket.com/ws/"
+POLYMARKET_DATA_API = "https://data-api.polymarket.com"
 
-_WS_PING_INTERVAL    = 15     # seconds between WebSocket keep-alive pings
-_WS_RECONNECT_DELAY  = 5      # seconds before reconnecting after WS drop
-_POLL_INTERVAL_SEC   = 8      # seconds between wallet activity polls
-_MAX_TRADES_PER_POLL = 50     # number of recent trades to fetch per poll cycle
-_MAX_WS_RETRIES      = 5      # consecutive failures before logging a warning burst
-_WS_MAX_BACKOFF      = 30.0   # H10: cap so WS retries at most every 30s, never 80s+
-_POLL_JITTER_SEC     = 2.0    # H17: bound on poll-interval jitter + per-wallet stagger
-_MIN_POLL_FLOOR      = 1.0    # H17: never let jitter drive the cycle below this floor
+_WS_PING_INTERVAL = 15  # seconds between WebSocket keep-alive pings
+_WS_RECONNECT_DELAY = 5  # seconds before reconnecting after WS drop
+_POLL_INTERVAL_SEC = 8  # seconds between wallet activity polls
+_MAX_TRADES_PER_POLL = 50  # number of recent trades to fetch per poll cycle
+_MAX_WS_RETRIES = 5  # consecutive failures before logging a warning burst
+_WS_MAX_BACKOFF = 30.0  # H10: cap so WS retries at most every 30s, never 80s+
+_POLL_JITTER_SEC = 2.0  # H17: bound on poll-interval jitter + per-wallet stagger
+_MIN_POLL_FLOOR = 1.0  # H17: never let jitter drive the cycle below this floor
 
 
 # ─── Data Models ──────────────────────────────────────────────────────────────
 
+
 class TradeType(Enum):
     """Enumeration of tracked-wallet trade actions (BUY, SELL, SIZE_UP, SIZE_DOWN)."""
-    BUY         = "BUY"    # New long position opened
-    SELL        = "SELL"   # Position partially or fully exited
-    SIZE_UP     = "SIZE_UP"
-    SIZE_DOWN   = "SIZE_DOWN"
+
+    BUY = "BUY"  # New long position opened
+    SELL = "SELL"  # Position partially or fully exited
+    SIZE_UP = "SIZE_UP"
+    SIZE_DOWN = "SIZE_DOWN"
 
 
 @dataclass(frozen=True)
@@ -82,15 +85,16 @@ class TradeEvent:
     Emitted when a tracked wallet executes a trade.
     The copier module subscribes to these and decides whether to copy.
     """
-    event_id:        str
-    wallet_address:  str
-    market_id:       str      # condition_id (market/question identifier)
-    token_id:        str      # asset_id (YES or NO token)
-    outcome_label:   str      # "Yes" or "No"
-    trade_type:      TradeType
-    price:           float    # Trade execution price, e.g. 0.72
-    size_usdc:       float    # Trade size in USDC
-    timestamp:       float    # Wall-clock Unix timestamp of the source trade
+
+    event_id: str
+    wallet_address: str
+    market_id: str  # condition_id (market/question identifier)
+    token_id: str  # asset_id (YES or NO token)
+    outcome_label: str  # "Yes" or "No"
+    trade_type: TradeType
+    price: float  # Trade execution price, e.g. 0.72
+    size_usdc: float  # Trade size in USDC
+    timestamp: float  # Wall-clock Unix timestamp of the source trade
     transaction_hash: str
     # Monotonic clock at the moment we detected this trade in our poll loop.
     # Used with time.monotonic() to measure decision_latency (detection → order).
@@ -101,8 +105,9 @@ class TradeEvent:
 @dataclass
 class PriceTick:
     """Emitted by WebSocket for each real-time price update on a subscribed token."""
-    token_id:  str
-    price:     float
+
+    token_id: str
+    price: float
     timestamp: float = field(default_factory=time.time)
 
 
@@ -113,6 +118,7 @@ PriceCallback = Callable[[PriceTick], Awaitable[None]]
 
 
 # ─── TradeMonitor ─────────────────────────────────────────────────────────────
+
 
 class TradeMonitor:
     """
@@ -130,25 +136,25 @@ class TradeMonitor:
     def __init__(
         self,
         tracked_wallets: List[str],
-        on_trade:        TradeCallback,
-        on_price:        Optional[PriceCallback] = None,
-        poll_interval:   float = _POLL_INTERVAL_SEC,
-        ws_url:          str   = POLYMARKET_WS_URL,
-        data_api_base:   str   = POLYMARKET_DATA_API,
-        prime_on_start:  bool  = True,
-        rate_limiter:    Optional[AsyncLimiter] = None,
-        ws_max_backoff:  float = _WS_MAX_BACKOFF,
-        poll_jitter:     float = _POLL_JITTER_SEC,
-        jitter_seed:     Optional[int] = None,
+        on_trade: TradeCallback,
+        on_price: Optional[PriceCallback] = None,
+        poll_interval: float = _POLL_INTERVAL_SEC,
+        ws_url: str = POLYMARKET_WS_URL,
+        data_api_base: str = POLYMARKET_DATA_API,
+        prime_on_start: bool = True,
+        rate_limiter: Optional[AsyncLimiter] = None,
+        ws_max_backoff: float = _WS_MAX_BACKOFF,
+        poll_jitter: float = _POLL_JITTER_SEC,
+        jitter_seed: Optional[int] = None,
     ):
         if not tracked_wallets:
             raise ValueError("tracked_wallets must be non-empty.")
 
-        self._wallets:      List[str]               = [w.lower() for w in tracked_wallets]
-        self._on_trade:     TradeCallback           = on_trade
-        self._on_price:     Optional[PriceCallback] = on_price
+        self._wallets: List[str] = [w.lower() for w in tracked_wallets]
+        self._on_trade: TradeCallback = on_trade
+        self._on_price: Optional[PriceCallback] = on_price
         self._poll_interval = poll_interval
-        self._ws_url        = ws_url
+        self._ws_url = ws_url
         self._data_api_base = data_api_base
         self._ws_max_backoff = ws_max_backoff
         # H17: front-run resistance. A perfectly periodic poll cadence on a fixed
@@ -168,18 +174,14 @@ class TradeMonitor:
         # OrderedDict (used as an insertion-ordered set) so overflow eviction is
         # FIFO — popping the OLDEST id, never an arbitrary recent one that could
         # then be re-detected and re-copied as a duplicate.
-        self._seen_trade_ids: Dict[str, "OrderedDict[str, None]"] = {
-            w: OrderedDict() for w in self._wallets
-        }
+        self._seen_trade_ids: Dict[str, "OrderedDict[str, None]"] = {w: OrderedDict() for w in self._wallets}
 
         # Wallets whose first poll has been used to PRIME the seen-set (seed the
         # baseline without copying). Prevents a cold start from copying up to
         # _MAX_TRADES_PER_POLL historical trades per wallet on launch. When
         # prime_on_start is False, every wallet is pre-marked as primed so the
         # first poll acts immediately (used in tests / replay scenarios).
-        self._primed_wallets: Set[str] = (
-            set() if prime_on_start else set(self._wallets)
-        )
+        self._primed_wallets: Set[str] = set() if prime_on_start else set(self._wallets)
 
         # Token IDs currently subscribed in the WebSocket
         self._subscribed_tokens: Set[str] = set()
@@ -188,11 +190,11 @@ class TradeMonitor:
         self._last_subscribed: Set[str] = set()
 
         # Whether the WS is currently connected and healthy
-        self._ws_healthy: bool    = False
+        self._ws_healthy: bool = False
         self._ws_retry_count: int = 0
 
         # asyncio task handles
-        self._ws_task:   Optional[asyncio.Task] = None
+        self._ws_task: Optional[asyncio.Task] = None
         self._poll_task: Optional[asyncio.Task] = None
         self._stop_event = asyncio.Event()
         # H9: heartbeat watchdog — updated after each successful poll cycle.
@@ -204,7 +206,8 @@ class TradeMonitor:
         """Start both the WebSocket price listener and the REST activity poller."""
         logger.info(
             "TradeMonitor starting | wallets=%d ws=%s",
-            len(self._wallets), "available" if _WS_AVAILABLE else "NOT INSTALLED",
+            len(self._wallets),
+            "available" if _WS_AVAILABLE else "NOT INSTALLED",
         )
 
         tasks = [
@@ -212,17 +215,14 @@ class TradeMonitor:
         ]
 
         if _WS_AVAILABLE:
-            tasks.append(
-                asyncio.create_task(self._ws_loop(), name="ws-listener")
-            )
+            tasks.append(asyncio.create_task(self._ws_loop(), name="ws-listener"))
         else:
             logger.warning(
-                "websockets package not installed. Running poll-only mode. "
-                "Install with: pip install websockets>=12.0"
+                "websockets package not installed. Running poll-only mode. Install with: pip install websockets>=12.0"
             )
 
         self._poll_task = tasks[0]
-        self._ws_task   = tasks[1] if len(tasks) > 1 else None
+        self._ws_task = tasks[1] if len(tasks) > 1 else None
 
         await asyncio.gather(*tasks, return_exceptions=True)
 
@@ -285,7 +285,7 @@ class TradeMonitor:
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
-                self._ws_healthy      = False
+                self._ws_healthy = False
                 self._ws_retry_count += 1
 
                 # H10: cap back-off so we retry at least every ws_max_backoff seconds;
@@ -301,12 +301,16 @@ class TradeMonitor:
                         "WebSocket: %d consecutive failures (%s). "
                         "Continuing to retry every %.0fs. "
                         "Exit poll is running faster in the meantime.",
-                        _MAX_WS_RETRIES, exc, delay,
+                        _MAX_WS_RETRIES,
+                        exc,
+                        delay,
                     )
                 else:
                     logger.warning(
                         "WebSocket disconnected (%s). Retry %d in %.0fs.",
-                        exc, self._ws_retry_count, delay,
+                        exc,
+                        self._ws_retry_count,
+                        delay,
                     )
                 await asyncio.sleep(delay)
 
@@ -338,12 +342,14 @@ class TradeMonitor:
 
     async def _ws_send_subscription(self, ws, token_ids: List[str]) -> None:
         """Send a Market subscription message to the Polymarket CLOB WebSocket."""
-        sub_msg = json.dumps({
-            "auth":      {},       # No auth needed for public market data
-            "type":      "Market",
-            "markets":   [],
-            "assets_ids": token_ids,
-        })
+        sub_msg = json.dumps(
+            {
+                "auth": {},  # No auth needed for public market data
+                "type": "Market",
+                "markets": [],
+                "assets_ids": token_ids,
+            }
+        )
         await ws.send(sub_msg)
         logger.info("WS subscribed to %d token(s): %s", len(token_ids), token_ids[:3])
 
@@ -368,7 +374,7 @@ class TradeMonitor:
 
         for event in events:
             event_type = event.get("event_type", "")
-            asset_id   = event.get("asset_id", "")
+            asset_id = event.get("asset_id", "")
 
             if asset_id not in self._subscribed_tokens:
                 continue
@@ -423,12 +429,10 @@ class TradeMonitor:
 
                 if sleep > 0.001:
                     try:
-                        await asyncio.wait_for(
-                            asyncio.shield(self._stop_event.wait()), timeout=sleep
-                        )
-                        break   # stop_event was set
+                        await asyncio.wait_for(asyncio.shield(self._stop_event.wait()), timeout=sleep)
+                        break  # stop_event was set
                     except asyncio.TimeoutError:
-                        pass    # Normal — sleep elapsed, continue polling
+                        pass  # Normal — sleep elapsed, continue polling
 
     async def _poll_all_wallets(self, session: aiohttp.ClientSession) -> None:
         """Fetch activity for all tracked wallets concurrently.
@@ -439,19 +443,14 @@ class TradeMonitor:
         one wallet learns it for all. The bounded offset decorrelates per-wallet
         timing while keeping detection latency within poll_jitter of immediate.
         """
-        tasks = [
-            self._poll_wallet_staggered(session, wallet)
-            for wallet in self._wallets
-        ]
+        tasks = [self._poll_wallet_staggered(session, wallet) for wallet in self._wallets]
         results = await asyncio.gather(*tasks, return_exceptions=True)
 
         for wallet, result in zip(self._wallets, results, strict=True):
             if isinstance(result, Exception):
                 logger.warning("Poll failed for wallet %s: %s", wallet[:10], result)
 
-    async def _poll_wallet_staggered(
-        self, session: aiohttp.ClientSession, wallet: str
-    ) -> None:
+    async def _poll_wallet_staggered(self, session: aiohttp.ClientSession, wallet: str) -> None:
         """Apply the H17 per-wallet phase offset, then poll the wallet."""
         if self._poll_jitter > 0:
             await asyncio.sleep(self._rng.uniform(0.0, self._poll_jitter))
@@ -460,18 +459,16 @@ class TradeMonitor:
     async def _poll_wallet(
         self,
         session: aiohttp.ClientSession,
-        wallet:  str,
+        wallet: str,
     ) -> None:
         """Fetch recent activity for a single wallet and emit TradeEvents for new trades."""
-        url    = f"{self._data_api_base}/activity"
+        url = f"{self._data_api_base}/activity"
         params: Dict[str, Any] = {"user": wallet, "limit": _MAX_TRADES_PER_POLL}
 
         async with self._rate_limiter:
             async with session.get(url, params=params) as resp:
                 if resp.status != 200:
-                    logger.warning(
-                        "Data API returned %d for wallet %s", resp.status, wallet[:10]
-                    )
+                    logger.warning("Data API returned %d for wallet %s", resp.status, wallet[:10])
                     return
 
                 activity: List[dict] = await resp.json()
@@ -487,15 +484,13 @@ class TradeMonitor:
             self._primed_wallets.add(wallet)
             logger.info(
                 "Primed wallet %s baseline (%d trade(s) seen, none copied)",
-                wallet[:10], len(self._seen_trade_ids[wallet]),
+                wallet[:10],
+                len(self._seen_trade_ids[wallet]),
             )
             return
 
         if new_trades:
-            logger.info(
-                "Detected %d new trade(s) from wallet %s",
-                len(new_trades), wallet[:10]
-            )
+            logger.info("Detected %d new trade(s) from wallet %s", len(new_trades), wallet[:10])
 
         for raw_trade in new_trades:
             event = _parse_trade_event(wallet, raw_trade)
@@ -504,9 +499,9 @@ class TradeMonitor:
 
     def _filter_new_trades(
         self,
-        wallet:   str,
+        wallet: str,
         activity: List[dict],
-        prime:    bool = False,
+        prime: bool = False,
     ) -> List[dict]:
         """
         Return only trades not previously seen for this wallet.
@@ -516,7 +511,7 @@ class TradeMonitor:
         an empty list is returned — used on a wallet's first poll so the existing
         backlog is recorded as the baseline rather than copied (cold-start guard).
         """
-        seen       = self._seen_trade_ids[wallet]
+        seen = self._seen_trade_ids[wallet]
         new_trades = []
 
         for item in activity:
@@ -541,23 +536,25 @@ class TradeMonitor:
 
 # ─── Parser ───────────────────────────────────────────────────────────────────
 
+
 def _parse_trade_event(wallet: str, raw: dict) -> Optional[TradeEvent]:
     """
     Convert a raw Data API activity record to a typed TradeEvent.
     Returns None if the record is missing required fields or is malformed.
     """
     try:
-        trade_id   = str(raw.get("id") or raw.get("transactionHash", ""))
-        market_id  = str(raw.get("market", raw.get("conditionId", "")))
-        token_id   = str(raw.get("asset", raw.get("tokenId", "")))
-        side_raw   = str(raw.get("side", "")).upper()
-        price      = float(raw.get("price", 0))
-        size       = float(raw.get("size", raw.get("usdcSize", 0)))
-        outcome    = raw.get("outcomeLabel", "YES" if raw.get("outcomeIndex", 0) == 0 else "NO")
+        trade_id = str(raw.get("id") or raw.get("transactionHash", ""))
+        market_id = str(raw.get("market", raw.get("conditionId", "")))
+        token_id = str(raw.get("asset", raw.get("tokenId", "")))
+        side_raw = str(raw.get("side", "")).upper()
+        price = float(raw.get("price", 0))
+        size = float(raw.get("size", raw.get("usdcSize", 0)))
+        outcome = raw.get("outcomeLabel", "YES" if raw.get("outcomeIndex", 0) == 0 else "NO")
 
         ts_raw = raw.get("timestamp", raw.get("createdAt", ""))
         if isinstance(ts_raw, str):
             from datetime import datetime
+
             ts = datetime.fromisoformat(ts_raw.replace("Z", "+00:00")).timestamp()
         elif isinstance(ts_raw, (int, float)):
             ts = ts_raw / 1_000.0 if ts_raw > 1e12 else float(ts_raw)
@@ -570,16 +567,16 @@ def _parse_trade_event(wallet: str, raw: dict) -> Optional[TradeEvent]:
         trade_type = TradeType.BUY if side_raw == "BUY" else TradeType.SELL
 
         return TradeEvent(
-            event_id        = trade_id,
-            wallet_address  = wallet,
-            market_id       = market_id,
-            token_id        = token_id,
-            outcome_label   = outcome,
-            trade_type      = trade_type,
-            price           = price,
-            size_usdc       = size,
-            timestamp       = ts,
-            transaction_hash = str(raw.get("transactionHash", "")),
+            event_id=trade_id,
+            wallet_address=wallet,
+            market_id=market_id,
+            token_id=token_id,
+            outcome_label=outcome,
+            trade_type=trade_type,
+            price=price,
+            size_usdc=size,
+            timestamp=ts,
+            transaction_hash=str(raw.get("transactionHash", "")),
         )
 
     except (KeyError, ValueError, TypeError) as exc:

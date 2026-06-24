@@ -25,7 +25,7 @@ from polymarket_copier.core.risk_manager import (
 # ─── Fixtures ─────────────────────────────────────────────────────────────────
 
 BANKROLL = 10_000.0
-CFG      = RiskConfig()   # Default config — all tests use this unless overridden
+CFG = RiskConfig()  # Default config — all tests use this unless overridden
 
 
 @pytest.fixture
@@ -33,38 +33,36 @@ def rm() -> RiskManager:
     # max_trader_allocation=1.0 keeps the per-trader cap from interfering with the
     # market-exposure and threshold tests; the trader cap has dedicated tests in
     # TestTraderAllocationCap below.
-    return RiskManager(
-        config=RiskConfig(max_trader_allocation=1.0), bankroll=BANKROLL
-    )
+    return RiskManager(config=RiskConfig(max_trader_allocation=1.0), bankroll=BANKROLL)
 
 
 async def build(
-    rm:          RiskManager,
-    entry:       float,
-    market_id:   str   = "mkt_default",
-    size:        float = 100.0,
-    resolve_ts:  float = None,
+    rm: RiskManager,
+    entry: float,
+    market_id: str = "mkt_default",
+    size: float = 100.0,
+    resolve_ts: float = None,
 ) -> Position:
     """Convenience wrapper around build_position for tests."""
     return await rm.build_position(
-        position_id    = f"pos_{entry}_{market_id}",
-        market_id      = market_id,
-        token_id       = f"tok_{market_id}",
-        trader_address = "0xTRADER",
-        entry_price    = entry,
-        size_shares    = size,
-        resolve_time   = resolve_ts,
+        position_id=f"pos_{entry}_{market_id}",
+        market_id=market_id,
+        token_id=f"tok_{market_id}",
+        trader_address="0xTRADER",
+        entry_price=entry,
+        size_shares=size,
+        resolve_time=resolve_ts,
     )
 
 
 # ─── [A] Threshold Computation — Core Math ────────────────────────────────────
 
-class TestThresholdComputation:
 
+class TestThresholdComputation:
     @pytest.mark.asyncio
     async def test_midrange_0_50(self, rm):
         pos = await build(rm, 0.50)
-        assert abs(pos.tp_price - 0.70)  < 1e-5, f"TP expected 0.70, got {pos.tp_price}"
+        assert abs(pos.tp_price - 0.70) < 1e-5, f"TP expected 0.70, got {pos.tp_price}"
         assert abs(pos.sl_price - 0.375) < 1e-5, f"SL expected 0.375, got {pos.sl_price}"
 
     @pytest.mark.asyncio
@@ -105,8 +103,8 @@ class TestThresholdComputation:
 
 # ─── [B] Near-Boundary Edge Cases ─────────────────────────────────────────────
 
-class TestNearBoundaryEntries:
 
+class TestNearBoundaryEntries:
     @pytest.mark.asyncio
     async def test_near_floor_0_02_sl_floored_at_zero(self, rm):
         pos = await build(rm, 0.02)
@@ -175,6 +173,7 @@ class TestNearBoundaryEntries:
 
 # ─── [B2] L5: Low-Entry TP Taper ──────────────────────────────────────────────
 
+
 class TestLowEntryTpTaper:
     """L5: below low_entry_threshold the TP fraction tapers down so the profit
     target stays realistic instead of demanding a multi-hundred-percent move."""
@@ -218,8 +217,8 @@ class TestLowEntryTpTaper:
 
 # ─── [C] Invalid Inputs ───────────────────────────────────────────────────────
 
-class TestInvalidInputs:
 
+class TestInvalidInputs:
     @pytest.mark.asyncio
     async def test_price_above_1_raises(self, rm):
         with pytest.raises(InvalidPriceError, match=r"\[0\.0, 1\.0\]"):
@@ -243,17 +242,22 @@ class TestInvalidInputs:
     def test_direct_position_no_tp_raises(self):
         with pytest.raises(ValueError, match="tp_price"):
             Position(
-                position_id="x", market_id="m", token_id="t",
-                trader_address="0xA", side=Side.BUY,
-                entry_price=0.50, size_shares=100.0,
-                tp_price=None, sl_price=0.375,
+                position_id="x",
+                market_id="m",
+                token_id="t",
+                trader_address="0xA",
+                side=Side.BUY,
+                entry_price=0.50,
+                size_shares=100.0,
+                tp_price=None,
+                sl_price=0.375,
             )
 
 
 # ─── [D] Evaluate() — Exit Signal Priority ────────────────────────────────────
 
-class TestEvaluatePriority:
 
+class TestEvaluatePriority:
     @pytest.mark.asyncio
     async def test_hold_within_range(self, rm):
         pos = await build(rm, 0.50)
@@ -306,8 +310,8 @@ class TestEvaluatePriority:
 
 # ─── [E] Trailing Stop ────────────────────────────────────────────────────────
 
-class TestTrailingStop:
 
+class TestTrailingStop:
     @pytest.mark.asyncio
     async def test_peak_updates_on_new_high(self, rm):
         # evaluate() no longer mutates pos.peak_price; the caller (copier) does.
@@ -372,8 +376,8 @@ class TestTrailingStop:
 
 # ─── [F] Time Exit ────────────────────────────────────────────────────────────
 
-class TestTimeExit:
 
+class TestTimeExit:
     @pytest.mark.asyncio
     async def test_time_exit_triggers_when_stale(self, rm):
         pos = await build(rm, 0.50)
@@ -395,13 +399,13 @@ class TestTimeExit:
 
 # ─── [G] Market Exposure Cap ──────────────────────────────────────────────────
 
-class TestMarketExposureCap:
 
+class TestMarketExposureCap:
     @pytest.mark.asyncio
     async def test_exposure_cap_enforced(self, rm):
         await build(rm, 0.50, market_id="mkt_A", size=1_400.0)  # $700
         with pytest.raises(ExposureCapError, match="cap="):
-            await build(rm, 0.50, market_id="mkt_A", size=400.0)   # $200 → over cap
+            await build(rm, 0.50, market_id="mkt_A", size=400.0)  # $200 → over cap
 
     @pytest.mark.asyncio
     async def test_different_markets_independent(self, rm):
@@ -425,8 +429,8 @@ class TestMarketExposureCap:
 
 # ─── [H] Record Exit & Bankroll ───────────────────────────────────────────────
 
-class TestRecordExit:
 
+class TestRecordExit:
     @pytest.mark.asyncio
     async def test_profitable_exit_increases_bankroll(self, rm):
         pos = await build(rm, 0.50, size=1_000.0)
@@ -461,15 +465,15 @@ class TestRecordExit:
         rm._daily_pnl = Decimal("-250.0")
         rm._day_start_ts = time.time() - 2 * 86_400  # window belongs to two days ago
         pos = await build(rm, 0.50, size=1_000.0)
-        await rm.record_exit(pos, 0.60)   # +100 profit, booked into the fresh window
+        await rm.record_exit(pos, 0.60)  # +100 profit, booked into the fresh window
         # Stale -250 was discarded at the rollover; only today's +100 remains.
         assert abs(rm.daily_pnl() - 100.0) < 0.01
 
 
 # ─── [I] Daily Loss Circuit Breaker ───────────────────────────────────────────
 
-class TestDailyLossCircuitBreaker:
 
+class TestDailyLossCircuitBreaker:
     @pytest.mark.asyncio
     async def test_daily_loss_limit_triggers(self, rm):
         pos = await build(rm, 0.50)
@@ -491,10 +495,9 @@ class TestDailyLossCircuitBreaker:
     @pytest.mark.asyncio
     async def test_custom_tight_daily_limit(self):
         cfg = RiskConfig(daily_loss_limit_pct=0.005)
-        rm  = RiskManager(config=cfg, bankroll=1_000.0)
+        rm = RiskManager(config=cfg, bankroll=1_000.0)
         pos = await rm.build_position(
-            position_id="p1", market_id="m1", token_id="t1",
-            trader_address="0xA", entry_price=0.50, size_shares=100.0
+            position_id="p1", market_id="m1", token_id="t1", trader_address="0xA", entry_price=0.50, size_shares=100.0
         )
         rm._daily_pnl = Decimal(str(-(1_000.0 * 0.005) - 0.01))
         assert rm.evaluate(pos, 0.55) == ExitReason.DAILY_LOSS_LIMIT
@@ -502,8 +505,8 @@ class TestDailyLossCircuitBreaker:
 
 # ─── [J] Resolution Blackout ──────────────────────────────────────────────────
 
-class TestResolutionBlackout:
 
+class TestResolutionBlackout:
     @pytest.mark.asyncio
     async def test_blackout_within_24h(self, rm):
         resolve_ts = time.time() + (6 * 3_600)
@@ -530,69 +533,62 @@ class TestResolutionBlackout:
     @pytest.mark.asyncio
     async def test_custom_blackout_window(self):
         cfg = RiskConfig(resolution_blackout_hours=48.0)
-        rm  = RiskManager(config=cfg, bankroll=BANKROLL)
+        rm = RiskManager(config=cfg, bankroll=BANKROLL)
         resolve_ts = time.time() + (36 * 3_600)
         pos = await rm.build_position(
-            "p1", "m1", "t1", "0xA",
-            entry_price=0.50, size_shares=100.0, resolve_time=resolve_ts
+            "p1", "m1", "t1", "0xA", entry_price=0.50, size_shares=100.0, resolve_time=resolve_ts
         )
         assert rm.evaluate(pos, 0.55) == ExitReason.MARKET_RESOLVING
 
 
 # ─── [I] Per-Trader Allocation Cap ────────────────────────────────────────────
 
+
 class TestTraderAllocationCap:
     """max_trader_allocation caps total $ copied from any single trader."""
 
     def _rm(self, pct=0.05):
-        return RiskManager(
-            config=RiskConfig(max_trader_allocation=pct), bankroll=BANKROLL
-        )
+        return RiskManager(config=RiskConfig(max_trader_allocation=pct), bankroll=BANKROLL)
 
     @pytest.mark.asyncio
     async def test_cap_enforced_for_one_trader(self):
-        rm = self._rm(0.05)   # cap = 5% * 10k = $500
-        await rm.build_position("p1", "mkt_A", "t1", "0xWHALE",
-                          entry_price=0.50, size_shares=800.0)   # $400
+        rm = self._rm(0.05)  # cap = 5% * 10k = $500
+        await rm.build_position("p1", "mkt_A", "t1", "0xWHALE", entry_price=0.50, size_shares=800.0)  # $400
         with pytest.raises(ExposureCapError, match="Trader"):
-            await rm.build_position("p2", "mkt_B", "t2", "0xWHALE",
-                              entry_price=0.50, size_shares=400.0)  # +$200 → $600 > $500
+            await rm.build_position(
+                "p2", "mkt_B", "t2", "0xWHALE", entry_price=0.50, size_shares=400.0
+            )  # +$200 → $600 > $500
 
     @pytest.mark.asyncio
     async def test_different_traders_independent(self):
         rm = self._rm(0.05)
-        await rm.build_position("p1", "mkt_A", "t1", "0xWHALE",
-                          entry_price=0.50, size_shares=900.0)   # $450
+        await rm.build_position("p1", "mkt_A", "t1", "0xWHALE", entry_price=0.50, size_shares=900.0)  # $450
         # A different trader has its own independent cap.
-        await rm.build_position("p2", "mkt_B", "t2", "0xOTHER",
-                          entry_price=0.50, size_shares=900.0)   # $450
+        await rm.build_position("p2", "mkt_B", "t2", "0xOTHER", entry_price=0.50, size_shares=900.0)  # $450
         assert rm.trader_exposure("0xWHALE") == pytest.approx(450.0)
         assert rm.trader_exposure("0xOTHER") == pytest.approx(450.0)
 
     @pytest.mark.asyncio
     async def test_exposure_released_on_exit(self):
         rm = self._rm(0.05)
-        pos = await rm.build_position("p1", "mkt_A", "t1", "0xWHALE",
-                                entry_price=0.50, size_shares=900.0)  # $450
+        pos = await rm.build_position("p1", "mkt_A", "t1", "0xWHALE", entry_price=0.50, size_shares=900.0)  # $450
         await rm.record_exit(pos, 0.50)
         assert rm.trader_exposure("0xWHALE") == pytest.approx(0.0)
 
     @pytest.mark.asyncio
     async def test_release_exposure_frees_trader_allocation(self):
         rm = self._rm(0.05)
-        await rm.build_position("p1", "mkt_A", "t1", "0xWHALE",
-                          entry_price=0.50, size_shares=900.0)  # $450
+        await rm.build_position("p1", "mkt_A", "t1", "0xWHALE", entry_price=0.50, size_shares=900.0)  # $450
         await rm.release_exposure("mkt_A", 450.0, "0xWHALE")
         assert rm.trader_exposure("0xWHALE") == pytest.approx(0.0)
         # And the trader can be copied again afterwards.
-        await rm.build_position("p2", "mkt_A", "t1", "0xWHALE",
-                          entry_price=0.50, size_shares=900.0)
+        await rm.build_position("p2", "mkt_A", "t1", "0xWHALE", entry_price=0.50, size_shares=900.0)
 
 
 # ─── [J] Trading Halt: daily-loss breaker + post-loss cooldown ────────────────
 
-class TestTradingHalt:
 
+class TestTradingHalt:
     def test_not_halted_by_default(self, rm):
         assert rm.is_trading_halted() is None
 
@@ -601,15 +597,16 @@ class TestTradingHalt:
         rm = RiskManager(
             config=RiskConfig(
                 daily_loss_limit_pct=0.03,
-                max_market_exposure_pct=1.0,   # keep market/trader caps out of the
-                max_trader_allocation=1.0,     # way so we can drive the loss
+                max_market_exposure_pct=1.0,  # keep market/trader caps out of the
+                max_trader_allocation=1.0,  # way so we can drive the loss
             ),
             bankroll=BANKROLL,
         )
         # Drive daily PnL below -3% * 10k = -$300 via a losing exit.
-        pos = await rm.build_position("p1", "mkt_A", "t1", "0xA",
-                                entry_price=0.50, size_shares=4_000.0)  # $2000 notional
-        await rm.record_exit(pos, 0.40)   # -0.10 * 4000 = -$400 < -$300
+        pos = await rm.build_position(
+            "p1", "mkt_A", "t1", "0xA", entry_price=0.50, size_shares=4_000.0
+        )  # $2000 notional
+        await rm.record_exit(pos, 0.40)  # -0.10 * 4000 = -$400 < -$300
         reason = rm.is_trading_halted()
         assert reason is not None
         assert "daily loss" in reason
@@ -618,15 +615,15 @@ class TestTradingHalt:
     async def test_cooldown_engages_after_consecutive_losses(self):
         rm = RiskManager(
             config=RiskConfig(
-                cooldown_after_losses=3, cooldown_minutes=60,
+                cooldown_after_losses=3,
+                cooldown_minutes=60,
                 daily_loss_limit_pct=1.0,  # keep daily breaker out of the way
             ),
             bankroll=BANKROLL,
         )
         for i in range(3):
-            pos = await rm.build_position(f"p{i}", "mkt_A", f"t{i}", "0xA",
-                                    entry_price=0.50, size_shares=100.0)
-            await rm.record_exit(pos, 0.49)   # small loss
+            pos = await rm.build_position(f"p{i}", "mkt_A", f"t{i}", "0xA", entry_price=0.50, size_shares=100.0)
+            await rm.record_exit(pos, 0.49)  # small loss
         reason = rm.is_trading_halted()
         assert reason is not None
         assert "cooldown" in reason
@@ -635,24 +632,24 @@ class TestTradingHalt:
     async def test_win_resets_loss_streak(self):
         rm = RiskManager(
             config=RiskConfig(
-                cooldown_after_losses=3, cooldown_minutes=60, daily_loss_limit_pct=1.0,
+                cooldown_after_losses=3,
+                cooldown_minutes=60,
+                daily_loss_limit_pct=1.0,
             ),
             bankroll=BANKROLL,
         )
         for i in range(2):
-            pos = await rm.build_position(f"p{i}", "mkt_A", f"t{i}", "0xA",
-                                    entry_price=0.50, size_shares=100.0)
-            await rm.record_exit(pos, 0.49)   # two losses
-        win = await rm.build_position("pw", "mkt_A", "tw", "0xA",
-                                entry_price=0.50, size_shares=100.0)
-        await rm.record_exit(win, 0.60)       # a win resets the streak
-        loss = await rm.build_position("pl", "mkt_A", "tl", "0xA",
-                                 entry_price=0.50, size_shares=100.0)
-        await rm.record_exit(loss, 0.49)      # one more loss — streak is 1, not 3
+            pos = await rm.build_position(f"p{i}", "mkt_A", f"t{i}", "0xA", entry_price=0.50, size_shares=100.0)
+            await rm.record_exit(pos, 0.49)  # two losses
+        win = await rm.build_position("pw", "mkt_A", "tw", "0xA", entry_price=0.50, size_shares=100.0)
+        await rm.record_exit(win, 0.60)  # a win resets the streak
+        loss = await rm.build_position("pl", "mkt_A", "tl", "0xA", entry_price=0.50, size_shares=100.0)
+        await rm.record_exit(loss, 0.49)  # one more loss — streak is 1, not 3
         assert rm.is_trading_halted() is None
 
 
 # ─── [N] Midnight UTC correctness ────────────────────────────────────────────
+
 
 class TestMidnightUtc:
     """_midnight_utc() must return 00:00:00 UTC regardless of the host timezone."""
@@ -684,6 +681,7 @@ class TestMidnightUtc:
 
 # ─── [O] Exposure cap restored correctly on restart ──────────────────────────
 
+
 class TestExposureRestoration:
     """Simulate the startup loop in main.py that reconstructs exposure from DB."""
 
@@ -698,8 +696,12 @@ class TestExposureRestoration:
         # A new position worth $200 should breach the cap.
         with pytest.raises(ExposureCapError):
             await rm.build_position(
-                "new_pos", "mkt_A", "tok_A", "0xNEW",
-                entry_price=0.50, size_shares=400.0,  # $200 at 0.50
+                "new_pos",
+                "mkt_A",
+                "tok_A",
+                "0xNEW",
+                entry_price=0.50,
+                size_shares=400.0,  # $200 at 0.50
             )
 
     @pytest.mark.asyncio
@@ -709,8 +711,12 @@ class TestExposureRestoration:
 
         # $50 new position fits under the $800 cap
         pos = await rm.build_position(
-            "new_pos", "mkt_A", "tok_A", "0xNEW",
-            entry_price=0.50, size_shares=100.0,  # $50 at 0.50
+            "new_pos",
+            "mkt_A",
+            "tok_A",
+            "0xNEW",
+            entry_price=0.50,
+            size_shares=100.0,  # $50 at 0.50
         )
         assert pos is not None
         assert float(rm._market_exposure["mkt_A"]) == pytest.approx(750.0)
@@ -719,12 +725,8 @@ class TestExposureRestoration:
         """Adding exposure for the same market accumulates, not overwrites."""
         rm = RiskManager(config=RiskConfig(max_trader_allocation=1.0), bankroll=BANKROLL)
         # Simulates restoring two open positions in the same market
-        rm._market_exposure["mkt_A"] = (
-            rm._market_exposure.get("mkt_A", Decimal("0")) + Decimal("300")
-        )
-        rm._market_exposure["mkt_A"] = (
-            rm._market_exposure.get("mkt_A", Decimal("0")) + Decimal("300")
-        )
+        rm._market_exposure["mkt_A"] = rm._market_exposure.get("mkt_A", Decimal("0")) + Decimal("300")
+        rm._market_exposure["mkt_A"] = rm._market_exposure.get("mkt_A", Decimal("0")) + Decimal("300")
         assert float(rm._market_exposure["mkt_A"]) == pytest.approx(600.0)
 
 
@@ -761,6 +763,10 @@ class TestRehydrateExposure:
         rm.rehydrate_exposure("mkt-a", "0xA", 790.0)  # cap is $800
         with pytest.raises(ExposureCapError):
             await rm.build_position(
-                position_id="p1", market_id="mkt-a", token_id="tok-a",
-                trader_address="0xB", entry_price=0.50, size_shares=100.0,  # +$50
+                position_id="p1",
+                market_id="mkt-a",
+                token_id="tok-a",
+                trader_address="0xB",
+                entry_price=0.50,
+                size_shares=100.0,  # +$50
             )

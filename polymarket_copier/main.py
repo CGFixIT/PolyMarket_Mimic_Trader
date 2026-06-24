@@ -26,9 +26,7 @@ def _update_tracker_metrics(tracker: TrackerClient) -> None:
     metrics.TRACKED_TRADERS.set(len(tracker.top_traders))
     metrics.LAST_TRACKER_REFRESH.set(tracker.last_refresh())
     for t in tracker.top_traders:
-        metrics.TRADER_SCORE.labels(
-            trader_address=t.stats.address, rank=str(t.rank)
-        ).set(t.score)
+        metrics.TRADER_SCORE.labels(trader_address=t.stats.address, rank=str(t.rank)).set(t.score)
 
 
 async def run_bot(config_path: Optional[str] = None, mode: Optional[str] = None) -> None:
@@ -41,7 +39,9 @@ async def run_bot(config_path: Optional[str] = None, mode: Optional[str] = None)
     logger.info("Polymarket Copy Trading Bot v2")
     logger.info(
         "Mode: %s | Bankroll: $%.2f | Max traders: %d",
-        config.mode.upper(), config.bankroll, config.max_tracked_traders,
+        config.mode.upper(),
+        config.bankroll,
+        config.max_tracked_traders,
     )
 
     # M16: optionally expose Prometheus metrics. No-op if prometheus_client is not
@@ -112,13 +112,9 @@ async def run_bot(config_path: Optional[str] = None, mode: Optional[str] = None)
     logger.info("Tracking %d wallets", len(wallets))
 
     copier = CopyTrader(risk_manager, portfolio, clob_client, gamma_client, config)
-    copier.update_tracker_win_rates(
-        {t.stats.address: t.stats.win_rate for t in top_traders}
-    )
+    copier.update_tracker_win_rates({t.stats.address: t.stats.win_rate for t in top_traders})
     # H18: feed the demonstrated-edge signal (mean per-trade ROI) for Kelly seeding.
-    copier.update_tracker_mean_pnl(
-        {t.stats.address: t.stats.mean_pnl for t in top_traders}
-    )
+    copier.update_tracker_mean_pnl({t.stats.address: t.stats.mean_pnl for t in top_traders})
 
     monitor = TradeMonitor(
         tracked_wallets=wallets,
@@ -170,7 +166,8 @@ async def run_bot(config_path: Optional[str] = None, mode: Optional[str] = None)
             if last is not None and (time.time() - last) > stall_limit:
                 logger.error(
                     "WATCHDOG: poll loop stalled for %.0fs (limit %.0fs)",
-                    time.time() - last, stall_limit,
+                    time.time() - last,
+                    stall_limit,
                 )
             elif last is None:
                 logger.warning("WATCHDOG: monitor has not completed its first poll yet")
@@ -182,12 +179,8 @@ async def run_bot(config_path: Optional[str] = None, mode: Optional[str] = None)
                 new_traders = await tracker.refresh()
                 if new_traders:
                     monitor.set_wallets([t.stats.address for t in new_traders])
-                    copier.update_tracker_win_rates(
-                        {t.stats.address: t.stats.win_rate for t in new_traders}
-                    )
-                    copier.update_tracker_mean_pnl(
-                        {t.stats.address: t.stats.mean_pnl for t in new_traders}
-                    )
+                    copier.update_tracker_win_rates({t.stats.address: t.stats.win_rate for t in new_traders})
+                    copier.update_tracker_mean_pnl({t.stats.address: t.stats.mean_pnl for t in new_traders})
                     _update_tracker_metrics(tracker)
                     logger.info("Rebalanced: now tracking %d wallets", len(monitor._wallets))
             demoted = await copier.check_trader_demotion()
@@ -211,9 +204,7 @@ async def run_bot(config_path: Optional[str] = None, mode: Optional[str] = None)
             metrics.TOTAL_EXPOSURE.set(risk_manager.total_exposure())
             metrics.CONSECUTIVE_LOSSES.set(risk_manager.consecutive_losses())
             metrics.COOLDOWN_SECONDS_REMAINING.set(risk_manager.cooldown_remaining())
-            metrics.TRADING_HALTED.set(
-                1 if risk_manager.is_trading_halted(unrealized_pnl=unrealized) else 0
-            )
+            metrics.TRADING_HALTED.set(1 if risk_manager.is_trading_halted(unrealized_pnl=unrealized) else 0)
             await asyncio.sleep(interval)
 
     async def exit_check_loop() -> None:
@@ -222,10 +213,7 @@ async def run_bot(config_path: Optional[str] = None, mode: Optional[str] = None)
         fast_interval = config.risk_management.exit_poll_fast_seconds
         while not shutdown_event.is_set():
             await copier.check_all_exits()
-            interval = (
-                fast_interval if not monitor.ws_healthy
-                else config.polling_interval_seconds
-            )
+            interval = fast_interval if not monitor.ws_healthy else config.polling_interval_seconds
             await asyncio.sleep(interval)
 
     async def shutdown_watcher() -> None:
@@ -235,10 +223,10 @@ async def run_bot(config_path: Optional[str] = None, mode: Optional[str] = None)
     logger.info("Starting bot...")
     try:
         await asyncio.gather(
-            supervise("monitor",       lambda: monitor.run()),
-            supervise("rebalance",     rebalance_loop),
-            supervise("exit_check",    exit_check_loop),
-            supervise("metrics",       metrics_loop),
+            supervise("monitor", lambda: monitor.run()),
+            supervise("rebalance", rebalance_loop),
+            supervise("exit_check", exit_check_loop),
+            supervise("metrics", metrics_loop),
             heartbeat_watchdog(),
             shutdown_watcher(),
         )

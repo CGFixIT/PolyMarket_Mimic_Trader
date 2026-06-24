@@ -48,9 +48,7 @@ class GammaClient:
             if self._session is None or self._session.closed:
                 self._session = aiohttp.ClientSession(
                     timeout=aiohttp.ClientTimeout(total=10),
-                    connector=aiohttp.TCPConnector(
-                        limit=_CONN_LIMIT, keepalive_timeout=_KEEPALIVE_TIMEOUT
-                    ),
+                    connector=aiohttp.TCPConnector(limit=_CONN_LIMIT, keepalive_timeout=_KEEPALIVE_TIMEOUT),
                 )
         return self._session
 
@@ -110,9 +108,9 @@ class GammaClient:
                     price = float(raw)
                     if not (0.0 <= price <= 1.0):
                         logger.warning(
-                            "Rejecting out-of-range price %.6f for token %s "
-                            "(Polymarket tokens are bounded in [0, 1])",
-                            price, token_id[:10],
+                            "Rejecting out-of-range price %.6f for token %s (Polymarket tokens are bounded in [0, 1])",
+                            price,
+                            token_id[:10],
                         )
                         return None
                     return price

@@ -70,7 +70,9 @@ def setup_logger(
         log_path = Path(log_file)
         log_path.parent.mkdir(parents=True, exist_ok=True)
         file_handler = RotatingFileHandler(
-            log_path, maxBytes=10_000_000, backupCount=5,
+            log_path,
+            maxBytes=10_000_000,
+            backupCount=5,
         )
         file_handler.setFormatter(formatter)
         logger.addHandler(file_handler)

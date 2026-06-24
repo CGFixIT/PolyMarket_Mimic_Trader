@@ -31,6 +31,7 @@ from polymarket_copier.models.types import Market
 
 # ─── Fake HTTP helpers ────────────────────────────────────────────────────────
 
+
 class _FakeResp:
     def __init__(self, data=None, status=200):
         self._data = data if data is not None else []
@@ -57,6 +58,7 @@ class _FakeSession:
 
 # ─── Shared fixtures ──────────────────────────────────────────────────────────
 
+
 @pytest.fixture
 def config() -> AppConfig:
     cfg = AppConfig(mode="paper", bankroll=10_000)
@@ -75,10 +77,15 @@ async def portfolio(tmp_path):
 @pytest.fixture
 def gamma():
     g = AsyncMock()
-    g.get_market = AsyncMock(return_value=Market(
-        condition_id="mkt-a", question="Q?", volume_24h=50_000, active=True,
-        resolve_time=None,
-    ))
+    g.get_market = AsyncMock(
+        return_value=Market(
+            condition_id="mkt-a",
+            question="Q?",
+            volume_24h=50_000,
+            active=True,
+            resolve_time=None,
+        )
+    )
     g.get_market_price = AsyncMock(return_value=0.50)
     return g
 
@@ -99,14 +106,22 @@ def wired(config, portfolio, gamma):
     return monitor, copier
 
 
-BUY_ACTIVITY = [{
-    "id": "trade-1", "type": "trade", "side": "BUY",
-    "market": "mkt-a", "asset": "tok-a",
-    "price": "0.50", "size": "100", "timestamp": 1_700_000_000,
-}]
+BUY_ACTIVITY = [
+    {
+        "id": "trade-1",
+        "type": "trade",
+        "side": "BUY",
+        "market": "mkt-a",
+        "asset": "tok-a",
+        "price": "0.50",
+        "size": "100",
+        "timestamp": 1_700_000_000,
+    }
+]
 
 
 # ─── TestAPIErrorResilience ────────────────────────────────────────────────────
+
 
 class TestAPIErrorResilience:
     """The poll loop must survive any HTTP error without crashing."""
@@ -187,6 +202,7 @@ class TestAPIErrorResilience:
 
 # ─── TestWSChaos ──────────────────────────────────────────────────────────────
 
+
 class TestWSChaos:
     """The WS message handler must be robust to malformed input and extreme prices."""
 
@@ -223,9 +239,7 @@ class TestWSChaos:
         raw = json.dumps([{"event_type": "price_change", "asset_id": "tok-a", "price": "1.50"}])
         await monitor._handle_ws_message(raw)
 
-        assert len(ticks_received) == 0, (
-            "An out-of-range price (1.50) must be filtered before emitting a PriceTick."
-        )
+        assert len(ticks_received) == 0, "An out-of-range price (1.50) must be filtered before emitting a PriceTick."
 
     async def test_ws_price_below_0_filtered_no_tick(self, wired):
         """A WS price < 0.0 must also be filtered."""
@@ -276,9 +290,7 @@ class TestWSChaos:
         await monitor._poll_wallet(session, "0xwhale")
         assert await copier.portfolio.position_count() == 1
 
-        tp_jump = json.dumps([
-            {"event_type": "price_change", "asset_id": "tok-a", "price": "0.99"}
-        ])
+        tp_jump = json.dumps([{"event_type": "price_change", "asset_id": "tok-a", "price": "0.99"}])
         await monitor._handle_ws_message(tp_jump)
 
         assert await copier.portfolio.position_count() == 0, (
@@ -295,9 +307,7 @@ class TestWSChaos:
         await monitor._poll_wallet(session, "0xwhale")
         assert await copier.portfolio.position_count() == 1
 
-        sl_crash = json.dumps([
-            {"event_type": "price_change", "asset_id": "tok-a", "price": "0.10"}
-        ])
+        sl_crash = json.dumps([{"event_type": "price_change", "asset_id": "tok-a", "price": "0.10"}])
         await monitor._handle_ws_message(sl_crash)
 
         assert await copier.portfolio.position_count() == 0, (
@@ -311,16 +321,19 @@ class TestWSChaos:
         session = _FakeSession(BUY_ACTIVITY)
         await monitor._poll_wallet(session, "0xwhale")
 
-        mixed = json.dumps([
-            {"event_type": "order_placed", "asset_id": "tok-a"},   # unknown → ignored
-            {"event_type": "price_change", "asset_id": "tok-a", "price": "0.99"},  # TP hit
-        ])
+        mixed = json.dumps(
+            [
+                {"event_type": "order_placed", "asset_id": "tok-a"},  # unknown → ignored
+                {"event_type": "price_change", "asset_id": "tok-a", "price": "0.99"},  # TP hit
+            ]
+        )
         await monitor._handle_ws_message(mixed)
 
         assert await copier.portfolio.position_count() == 0
 
 
 # ─── TestConcurrencyInvariants ────────────────────────────────────────────────
+
 
 class TestConcurrencyInvariants:
     """Concurrent wallet polls and exit triggers must not corrupt positions or exposure."""
@@ -344,16 +357,40 @@ class TestConcurrencyInvariants:
         )
         copier.monitor = monitor
 
-        gamma.get_market = AsyncMock(side_effect=lambda mid: Market(
-            condition_id=mid, question="Q?", volume_24h=50_000, active=True, resolve_time=None,
-        ))
+        gamma.get_market = AsyncMock(
+            side_effect=lambda mid: Market(
+                condition_id=mid,
+                question="Q?",
+                volume_24h=50_000,
+                active=True,
+                resolve_time=None,
+            )
+        )
 
-        activity_w1 = [{"id": "t-w1", "type": "trade", "side": "BUY",
-                        "market": "mkt-1", "asset": "tok-1",
-                        "price": "0.50", "size": "50", "timestamp": 1_700_000_000}]
-        activity_w2 = [{"id": "t-w2", "type": "trade", "side": "BUY",
-                        "market": "mkt-2", "asset": "tok-2",
-                        "price": "0.50", "size": "50", "timestamp": 1_700_000_000}]
+        activity_w1 = [
+            {
+                "id": "t-w1",
+                "type": "trade",
+                "side": "BUY",
+                "market": "mkt-1",
+                "asset": "tok-1",
+                "price": "0.50",
+                "size": "50",
+                "timestamp": 1_700_000_000,
+            }
+        ]
+        activity_w2 = [
+            {
+                "id": "t-w2",
+                "type": "trade",
+                "side": "BUY",
+                "market": "mkt-2",
+                "asset": "tok-2",
+                "price": "0.50",
+                "size": "50",
+                "timestamp": 1_700_000_000,
+            }
+        ]
 
         session_w1 = _FakeSession(activity_w1)
         session_w2 = _FakeSession(activity_w2)
@@ -388,12 +425,30 @@ class TestConcurrencyInvariants:
         copier.monitor = monitor
 
         # Both wallets trade the SAME token on the SAME market.
-        same_token_activity_w1 = [{"id": "t1-w1", "type": "trade", "side": "BUY",
-                                    "market": "mkt-shared", "asset": "tok-shared",
-                                    "price": "0.50", "size": "50", "timestamp": 1_700_000_000}]
-        same_token_activity_w2 = [{"id": "t1-w2", "type": "trade", "side": "BUY",
-                                    "market": "mkt-shared", "asset": "tok-shared",
-                                    "price": "0.50", "size": "50", "timestamp": 1_700_000_000}]
+        same_token_activity_w1 = [
+            {
+                "id": "t1-w1",
+                "type": "trade",
+                "side": "BUY",
+                "market": "mkt-shared",
+                "asset": "tok-shared",
+                "price": "0.50",
+                "size": "50",
+                "timestamp": 1_700_000_000,
+            }
+        ]
+        same_token_activity_w2 = [
+            {
+                "id": "t1-w2",
+                "type": "trade",
+                "side": "BUY",
+                "market": "mkt-shared",
+                "asset": "tok-shared",
+                "price": "0.50",
+                "size": "50",
+                "timestamp": 1_700_000_000,
+            }
+        ]
         s1 = _FakeSession(same_token_activity_w1)
         s2 = _FakeSession(same_token_activity_w2)
 

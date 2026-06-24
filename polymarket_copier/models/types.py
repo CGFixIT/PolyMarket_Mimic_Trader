@@ -10,6 +10,7 @@ from pydantic import BaseModel, Field
 
 class Market(BaseModel):
     """A Polymarket prediction market."""
+
     condition_id: str
     question: str = ""
     token_id_yes: str = ""
@@ -21,6 +22,7 @@ class Market(BaseModel):
 
 class Order(BaseModel):
     """An order to place on the CLOB."""
+
     market_id: str
     token_id: str
     side: Literal["BUY", "SELL"]

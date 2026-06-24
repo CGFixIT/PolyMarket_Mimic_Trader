@@ -13,8 +13,13 @@ from polymarket_copier.utils.logger import JsonFormatter, log_event, setup_logge
 
 def _make_record(msg="hello %s", args=("world",), level=logging.INFO):
     return logging.LogRecord(
-        name="x", level=level, pathname="m.py", lineno=1,
-        msg=msg, args=args, exc_info=None,
+        name="x",
+        level=level,
+        pathname="m.py",
+        lineno=1,
+        msg=msg,
+        args=args,
+        exc_info=None,
     )
 
 

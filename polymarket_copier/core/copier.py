@@ -90,7 +90,8 @@ class CopyTrader:
         """
         metrics.COPIES_SKIPPED.labels(reason=reason).inc()
         log_event(
-            logger, "copy_skipped",
+            logger,
+            "copy_skipped",
             reason=reason,
             trader=event.wallet_address,
             market_id=event.market_id,
@@ -107,11 +108,14 @@ class CopyTrader:
         wall_age = time.time() - event.timestamp
 
         logger.info(
-            "Trade event from %s: %s $%.2f @ %.4f on %s | "
-            "wall_age=%.2fs detect_latency=%.3fs",
-            event.wallet_address[:10], event.trade_type.value,
-            event.size_usdc, event.price, event.market_id[:10],
-            wall_age, detection_latency,
+            "Trade event from %s: %s $%.2f @ %.4f on %s | wall_age=%.2fs detect_latency=%.3fs",
+            event.wallet_address[:10],
+            event.trade_type.value,
+            event.size_usdc,
+            event.price,
+            event.market_id[:10],
+            wall_age,
+            detection_latency,
         )
         metrics.TRADE_EVENTS.labels(trade_type=event.trade_type.value).inc()
 
@@ -121,10 +125,7 @@ class CopyTrader:
         # 2. Mirror source exits before the non-BUY early return: if the tracked
         #    trader sold a token we hold, treat it as an exit signal.
         if event.trade_type != TradeType.BUY:
-            if (
-                event.trade_type == TradeType.SELL
-                and self.config.copy_trading.mirror_source_exits
-            ):
+            if event.trade_type == TradeType.SELL and self.config.copy_trading.mirror_source_exits:
                 await self._handle_source_exit(event)
             else:
                 logger.debug("Skipping non-BUY trade")
@@ -138,9 +139,13 @@ class CopyTrader:
         if halt_reason:
             logger.warning("Skip: trading halted — %s", halt_reason)
             log_event(
-                logger, "circuit_breaker_tripped", level=logging.WARNING,
-                reason=halt_reason, unrealized_pnl=round(unrealized, 4),
-                trader=event.wallet_address, market_id=event.market_id,
+                logger,
+                "circuit_breaker_tripped",
+                level=logging.WARNING,
+                reason=halt_reason,
+                unrealized_pnl=round(unrealized, 4),
+                trader=event.wallet_address,
+                market_id=event.market_id,
             )
             metrics.COPIES_SKIPPED.labels(reason="trading_halted").inc()
             return
@@ -171,8 +176,7 @@ class CopyTrader:
 
         # 3. Resolution blackout. Fail CLOSED if market metadata is unavailable.
         if market is None and self.config.risk_management.fail_closed_on_missing_data:
-            logger.info("Skip: market data unavailable for %s (fail-closed)",
-                        event.market_id[:10])
+            logger.info("Skip: market data unavailable for %s (fail-closed)", event.market_id[:10])
             self._record_skip("missing_market_data", event)
             return
         if market and market.resolve_time:
@@ -190,7 +194,8 @@ class CopyTrader:
             if event.token_id not in known:
                 logger.warning(
                     "Skip: token %s not recognized as YES/NO for market %s",
-                    event.token_id[:10], event.market_id[:10],
+                    event.token_id[:10],
+                    event.market_id[:10],
                 )
                 self._record_skip("unrecognized_token", event)
                 return
@@ -198,8 +203,7 @@ class CopyTrader:
         # 4. Price deviation check. Fail CLOSED if the current price is unknown.
         if current_price is None:
             if self.config.risk_management.fail_closed_on_missing_data:
-                logger.info("Skip: current price unavailable for token %s (fail-closed)",
-                            event.token_id[:10])
+                logger.info("Skip: current price unavailable for token %s (fail-closed)", event.token_id[:10])
                 self._record_skip("missing_price", event)
                 return
             current_price = event.price
@@ -216,13 +220,17 @@ class CopyTrader:
             if signed_dev > ct.max_price_deviation:
                 logger.info(
                     "Skip: adverse price move +%.1f%% (current=%.4f whale=%.4f > max %.1f%%)",
-                    signed_dev * 100, current_price, event.price,
+                    signed_dev * 100,
+                    current_price,
+                    event.price,
                     ct.max_price_deviation * 100,
                 )
                 self._record_skip(
-                    "adverse_price_move", event,
+                    "adverse_price_move",
+                    event,
                     deviation_pct=round(signed_dev * 100, 2),
-                    current_price=current_price, whale_price=event.price,
+                    current_price=current_price,
+                    whale_price=event.price,
                 )
                 return
             if signed_dev < -ct.max_favorable_deviation:
@@ -231,9 +239,11 @@ class CopyTrader:
                     abs(signed_dev) * 100,
                 )
                 self._record_skip(
-                    "favorable_collapse", event,
+                    "favorable_collapse",
+                    event,
                     deviation_pct=round(signed_dev * 100, 2),
-                    current_price=current_price, whale_price=event.price,
+                    current_price=current_price,
+                    whale_price=event.price,
                 )
                 return
 
@@ -243,7 +253,9 @@ class CopyTrader:
         if not (ct.min_entry_price <= current_price <= ct.max_entry_price):
             logger.info(
                 "Skip: entry price %.4f outside band [%.2f, %.2f]",
-                current_price, ct.min_entry_price, ct.max_entry_price,
+                current_price,
+                ct.min_entry_price,
+                ct.max_entry_price,
             )
             self._record_skip("entry_price_band", event, current_price=current_price)
             return
@@ -256,7 +268,9 @@ class CopyTrader:
         if tp_estimate <= adj_entry:
             logger.info(
                 "Skip: post-fee edge exhausted (tp=%.4f <= adj_entry=%.4f at %.1f%% fee)",
-                tp_estimate, adj_entry, ct.round_trip_fee_pct * 100,
+                tp_estimate,
+                adj_entry,
+                ct.round_trip_fee_pct * 100,
             )
             self._record_skip("post_fee_edge", event, tp_estimate=round(tp_estimate, 4), adj_entry=round(adj_entry, 4))
             return
@@ -265,7 +279,8 @@ class CopyTrader:
         if market and market.volume_24h < self.config.copy_trading.min_market_volume:
             logger.info(
                 "Skip: 24h volume $%.0f < min $%.0f",
-                market.volume_24h, self.config.copy_trading.min_market_volume,
+                market.volume_24h,
+                self.config.copy_trading.min_market_volume,
             )
             self._record_skip("low_volume", event, volume_24h=market.volume_24h)
             return
@@ -279,9 +294,7 @@ class CopyTrader:
         copy_size_usdc = min(event.size_usdc * ct.size_multiplier, max_cap_usdc)
 
         if ct.kelly_enabled:
-            win_rate, sample = await self.portfolio.get_trader_win_rate(
-                event.wallet_address
-            )
+            win_rate, sample = await self.portfolio.get_trader_win_rate(event.wallet_address)
             if sample >= ct.kelly_min_trades:
                 copy_size_usdc = kelly_size_usdc(
                     win_rate,
@@ -317,9 +330,12 @@ class CopyTrader:
                     max_edge=ct.kelly_max_edge,
                 )
                 logger.debug(
-                    "Kelly: seeded edge=%.4f (roi=%.4f decay=%.3f) from tracker "
-                    "(own sample=%d < %d)",
-                    effective_edge, mean_roi, decay, sample, ct.kelly_min_trades,
+                    "Kelly: seeded edge=%.4f (roi=%.4f decay=%.3f) from tracker (own sample=%d < %d)",
+                    effective_edge,
+                    mean_roi,
+                    decay,
+                    sample,
+                    ct.kelly_min_trades,
                 )
 
         # Hard ceiling regardless of sizing path.
@@ -363,14 +379,17 @@ class CopyTrader:
                     reval_dev = (fresh_price - current_price) / max(current_price, 1e-9)
                     if reval_dev > ct.max_price_deviation:
                         logger.info(
-                            "Skip: edge collapsed since detection "
-                            "(price %.4f -> %.4f, +%.1f%% > max %.1f%%)",
-                            current_price, fresh_price, reval_dev * 100,
+                            "Skip: edge collapsed since detection (price %.4f -> %.4f, +%.1f%% > max %.1f%%)",
+                            current_price,
+                            fresh_price,
+                            reval_dev * 100,
                             ct.max_price_deviation * 100,
                         )
                         self._record_skip(
-                            "edge_collapsed_revalidation", event,
-                            current_price=current_price, fresh_price=fresh_price,
+                            "edge_collapsed_revalidation",
+                            event,
+                            current_price=current_price,
+                            fresh_price=fresh_price,
                             deviation_pct=round(reval_dev * 100, 2),
                         )
                         return
@@ -392,7 +411,8 @@ class CopyTrader:
                 if len(token_positions) >= max_per_token:
                     logger.info(
                         "Skip: max positions per token (%d) reached on %s",
-                        max_per_token, event.token_id[:10],
+                        max_per_token,
+                        event.token_id[:10],
                     )
                     self._record_skip("max_per_token", event, max_per_token=max_per_token)
                     return
@@ -402,7 +422,8 @@ class CopyTrader:
             if trader_pnl <= -(self.risk.bankroll * self.config.risk_management.drawdown_stop_pct):
                 logger.info(
                     "Skip: trader %s drawdown stop (pnl=$%.2f)",
-                    event.wallet_address[:10], trader_pnl,
+                    event.wallet_address[:10],
+                    trader_pnl,
                 )
                 self._record_skip("trader_drawdown", event, trader_pnl=round(trader_pnl, 2))
                 return
@@ -444,17 +465,13 @@ class CopyTrader:
                 order_result = await self.clob.place_order_with_timeout(order)
             except InsufficientLiquidityError as e:
                 logger.info("Skip: insufficient liquidity — %s", e)
-                await self.risk.release_exposure(
-                    pos.market_id, pos.entry_price * pos.size_shares, pos.trader_address
-                )
+                await self.risk.release_exposure(pos.market_id, pos.entry_price * pos.size_shares, pos.trader_address)
                 metrics.EXPOSURE_RELEASED.labels(cause="insufficient_liquidity").inc()
                 self._record_skip("insufficient_liquidity", event)
                 return
             except Exception as e:
                 logger.error("Order placement failed: %s", e)
-                await self.risk.release_exposure(
-                    pos.market_id, pos.entry_price * pos.size_shares, pos.trader_address
-                )
+                await self.risk.release_exposure(pos.market_id, pos.entry_price * pos.size_shares, pos.trader_address)
                 metrics.EXPOSURE_RELEASED.labels(cause="order_failed").inc()
                 self._record_skip("order_failed", event)
                 return
@@ -465,9 +482,7 @@ class CopyTrader:
             #      strand the unfilled exposure that build_position() reserved.
             #      PAPER results report a full fill at fill_price, so this is a no-op
             #      there and paper behaviour is preserved exactly.
-            filled_shares, avg_fill_price = self._reconcile_fill(
-                order_result, size_shares, current_price
-            )
+            filled_shares, avg_fill_price = self._reconcile_fill(order_result, size_shares, current_price)
 
             # Exposure accounting basis: build_position() registered
             # `entry_price * size_shares` at the PRE-fill current_price into BOTH the
@@ -480,13 +495,12 @@ class CopyTrader:
             if filled_shares <= 0.0:
                 # No fill: release the FULL registered notional and abort without
                 # opening a position or subscribing the token.
-                await self.risk.release_exposure(
-                    pos.market_id, registered_notional, pos.trader_address
-                )
+                await self.risk.release_exposure(pos.market_id, registered_notional, pos.trader_address)
                 metrics.EXPOSURE_RELEASED.labels(cause="no_fill").inc()
                 logger.info(
                     "Skip: order did not fill (0 shares) — released $%.2f exposure on %s",
-                    registered_notional, event.market_id[:10],
+                    registered_notional,
+                    event.market_id[:10],
                 )
                 self._record_skip("no_fill", event, registered_notional=round(registered_notional, 2))
                 return
@@ -499,14 +513,15 @@ class CopyTrader:
                 # registered_notional.
                 unfilled_fraction = (size_shares - filled_shares) / size_shares
                 release_value = registered_notional * unfilled_fraction
-                await self.risk.release_exposure(
-                    pos.market_id, release_value, pos.trader_address
-                )
+                await self.risk.release_exposure(pos.market_id, release_value, pos.trader_address)
                 metrics.EXPOSURE_RELEASED.labels(cause="partial_fill_remainder").inc()
                 pos.size_shares = filled_shares
                 logger.info(
                     "Partial fill: %.2f/%.2f shares — released $%.2f unfilled exposure on %s",
-                    filled_shares, size_shares, release_value, event.market_id[:10],
+                    filled_shares,
+                    size_shares,
+                    release_value,
+                    event.market_id[:10],
                 )
 
             # H5: Set entry/peak to the actual average fill price and recompute TP/SL.
@@ -518,14 +533,16 @@ class CopyTrader:
             if fill_price != pos.entry_price:
                 new_tp, new_sl = self.risk._compute_thresholds(fill_price)
                 pos.entry_price = fill_price
-                pos.peak_price  = fill_price
-                pos.tp_price    = new_tp
-                pos.sl_price    = new_sl
+                pos.peak_price = fill_price
+                pos.tp_price = new_tp
+                pos.sl_price = new_sl
 
             decision_latency = time.monotonic() - decision_start
             logger.info(
                 "Latency | wall_age=%.2fs detect_latency=%.3fs decision_latency=%.3fs",
-                wall_age, detection_latency, decision_latency,
+                wall_age,
+                detection_latency,
+                decision_latency,
             )
 
             await self.portfolio.open_position(pos)
@@ -536,11 +553,17 @@ class CopyTrader:
 
         logger.info(
             "Copied: %s $%.2f @ %.4f (fill %.4f) | TP=%.4f SL=%.4f | from %s",
-            event.trade_type.value, copy_size_usdc, current_price, fill_price,
-            pos.tp_price, pos.sl_price, event.wallet_address[:10],
+            event.trade_type.value,
+            copy_size_usdc,
+            current_price,
+            fill_price,
+            pos.tp_price,
+            pos.sl_price,
+            event.wallet_address[:10],
         )
         log_event(
-            logger, "position_opened",
+            logger,
+            "position_opened",
             position_id=pos.position_id,
             trader=event.wallet_address,
             market_id=event.market_id,
@@ -676,29 +699,30 @@ class CopyTrader:
                 # A FAK that returns without raising can still report zero filled_size
                 # (thin book, nobody on the bid). Treat zero-fill as a failed attempt
                 # rather than a phantom close that reports PnL on shares still held.
-                filled_shares, avg_fill_price = self._reconcile_fill(
-                    exit_result, exit_shares, price
-                )
+                filled_shares, avg_fill_price = self._reconcile_fill(exit_result, exit_shares, price)
                 if filled_shares > 0.0:
                     break
                 logger.warning(
                     "Exit order attempt %d/3: zero fill for %s — will retry",
-                    attempt + 1, pos.position_id,
+                    attempt + 1,
+                    pos.position_id,
                 )
                 if attempt < 2:
-                    await asyncio.sleep(2 ** attempt)
+                    await asyncio.sleep(2**attempt)
             except Exception as e:
                 if attempt < 2:
                     logger.warning(
                         "Exit order attempt %d/3 failed for %s: %s",
-                        attempt + 1, pos.position_id, e,
+                        attempt + 1,
+                        pos.position_id,
+                        e,
                     )
-                    await asyncio.sleep(2 ** attempt)
+                    await asyncio.sleep(2**attempt)
                 else:
                     logger.error(
-                        "Exit order permanently failed for %s after 3 attempts: %s — "
-                        "manual intervention required",
-                        pos.position_id, e,
+                        "Exit order permanently failed for %s after 3 attempts: %s — manual intervention required",
+                        pos.position_id,
+                        e,
                     )
 
         if filled_shares <= 0.0:
@@ -730,10 +754,16 @@ class CopyTrader:
 
         logger.info(
             "Exited [%s]: %s pnl=$%.4f @ %.4f (filled=%.2f/%0.2f shares)",
-            reason.name, pos.position_id, pnl, avg_fill_price, filled_shares, exit_shares,
+            reason.name,
+            pos.position_id,
+            pnl,
+            avg_fill_price,
+            filled_shares,
+            exit_shares,
         )
         log_event(
-            logger, "position_closed",
+            logger,
+            "position_closed",
             position_id=pos.position_id,
             reason=reason.name,
             pnl=round(pnl, 4),
@@ -771,7 +801,9 @@ class CopyTrader:
         for pos in positions:
             logger.info(
                 "Source exit signal: trader %s sold %s — closing copy position %s",
-                event.wallet_address[:10], event.token_id[:10], pos.position_id,
+                event.wallet_address[:10],
+                event.token_id[:10],
+                pos.position_id,
             )
             await self._exit_position(pos, exit_price, ExitReason.SOURCE_EXIT)
 
@@ -808,6 +840,7 @@ class CopyTrader:
         """Drop tracked traders whose Wilson upper bound on copy win-rate is below
         config min_win_rate. Returns list of demoted wallet addresses."""
         import math
+
         demoted = []
         min_win_rate = self.config.trader_selection.min_win_rate
         for addr in list(self._tracker_win_rates.keys()):
@@ -819,21 +852,29 @@ class CopyTrader:
             n = sample
             p = win_rate
             denom = 1 + z**2 / n
-            centre = (p + z**2 / (2*n)) / denom
-            margin = (z * math.sqrt(p*(1-p)/n + z**2/(4*n**2))) / denom
+            centre = (p + z**2 / (2 * n)) / denom
+            margin = (z * math.sqrt(p * (1 - p) / n + z**2 / (4 * n**2))) / denom
             wilson_upper = centre + margin
             if wilson_upper < min_win_rate:
                 demoted.append(addr)
                 self._demoted_traders.add(addr)
                 logger.warning(
                     "Demoting trader %s: Wilson upper=%.3f < min_win_rate=%.3f (n=%d)",
-                    addr[:10], wilson_upper, min_win_rate, sample,
+                    addr[:10],
+                    wilson_upper,
+                    min_win_rate,
+                    sample,
                 )
                 log_event(
-                    logger, "trader_demoted", level=logging.WARNING,
-                    trader=addr, wilson_upper=round(wilson_upper, 4),
-                    min_win_rate=min_win_rate, observed_win_rate=round(win_rate, 4),
-                    sample=sample, reason="wilson_below_min_win_rate",
+                    logger,
+                    "trader_demoted",
+                    level=logging.WARNING,
+                    trader=addr,
+                    wilson_upper=round(wilson_upper, 4),
+                    min_win_rate=min_win_rate,
+                    observed_win_rate=round(win_rate, 4),
+                    sample=sample,
+                    reason="wilson_below_min_win_rate",
                 )
         # Remove demoted traders from the tracker priors so Kelly stops using them
         for addr in demoted:
