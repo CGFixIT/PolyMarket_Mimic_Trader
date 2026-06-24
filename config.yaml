@@ -15,6 +15,7 @@ copy_trading:
   max_trader_allocation: 0.05
   max_price_deviation: 0.02
   max_concurrent_positions: 10
+  max_positions_per_token: 3      # M9: cap copies on one token (0 disables)
   min_market_volume: 5000
   max_trade_age_seconds: 12
   mirror_source_exits: true
@@ -27,6 +28,8 @@ copy_trading:
 risk_management:
   tp_range_fraction: 0.40
   sl_range_fraction: 0.25
+  low_entry_threshold: 0.20       # L5: below this entry, taper the TP fraction
+  low_entry_tp_fraction: 0.25     # L5: TP fraction floor at the price floor
   min_tp_abs: 0.03
   min_sl_abs: 0.02
   trailing_stop_fraction: 0.15

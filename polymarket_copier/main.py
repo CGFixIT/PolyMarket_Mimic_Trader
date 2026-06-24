@@ -36,6 +36,8 @@ async def run_bot(config_path: Optional[str] = None, mode: Optional[str] = None)
     risk_cfg = RiskConfig(
         tp_range_fraction=config.risk_management.tp_range_fraction,
         sl_range_fraction=config.risk_management.sl_range_fraction,
+        low_entry_threshold=config.risk_management.low_entry_threshold,
+        low_entry_tp_fraction=config.risk_management.low_entry_tp_fraction,
         min_tp_abs=config.risk_management.min_tp_abs,
         min_sl_abs=config.risk_management.min_sl_abs,
         min_reward_risk=config.risk_management.min_reward_risk,

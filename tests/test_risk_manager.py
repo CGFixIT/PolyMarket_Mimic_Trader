@@ -114,9 +114,14 @@ class TestNearBoundaryEntries:
 
     @pytest.mark.asyncio
     async def test_near_floor_0_02_tp_well_above_entry(self, rm):
+        # L5: TP fraction tapers down at low entries. At entry=0.02, threshold=0.20:
+        #   t = 0.02/0.20 = 0.10
+        #   tp_fraction = 0.25 + (0.40-0.25)*0.10 = 0.265
+        #   tp_raw = 0.02 + max(0.98*0.265, 0.03) = 0.02 + 0.2597 = 0.2797
+        # (was 0.412 before L5 with flat 0.40 fraction)
         pos = await build(rm, 0.02)
         assert pos.tp_price > 0.02 + CFG.min_tp_abs
-        assert abs(pos.tp_price - 0.412) < 1e-5
+        assert abs(pos.tp_price - 0.2797) < 1e-4
 
     @pytest.mark.asyncio
     async def test_entry_0_01(self, rm):
@@ -127,9 +132,12 @@ class TestNearBoundaryEntries:
 
     @pytest.mark.asyncio
     async def test_entry_exactly_0_00(self, rm):
+        # L5: at entry=0.00 the TP fraction tapers fully to low_entry_tp_fraction=0.25:
+        #   t = 0.00/0.20 = 0.0 → tp_fraction = 0.25
+        #   tp_raw = 0.0 + max(1.0*0.25, 0.03) = 0.25  (was 0.40 before L5)
         pos = await build(rm, 0.00)
         assert pos.sl_price == 0.0
-        assert abs(pos.tp_price - 0.40) < 1e-5
+        assert abs(pos.tp_price - 0.25) < 1e-5
 
     @pytest.mark.asyncio
     async def test_near_floor_0_05(self, rm):
@@ -163,6 +171,49 @@ class TestNearBoundaryEntries:
     async def test_near_ceiling_0_95(self, rm):
         pos = await build(rm, 0.95)
         assert abs(pos.tp_price - 0.98) < 1e-5
+
+
+# ─── [B2] L5: Low-Entry TP Taper ──────────────────────────────────────────────
+
+class TestLowEntryTpTaper:
+    """L5: below low_entry_threshold the TP fraction tapers down so the profit
+    target stays realistic instead of demanding a multi-hundred-percent move."""
+
+    @pytest.mark.asyncio
+    async def test_threshold_boundary_uses_full_fraction(self, rm):
+        # At exactly low_entry_threshold (0.20) the taper does NOT apply (exclusive).
+        # tp = 0.20 + 0.80*0.40 = 0.52 (unchanged from pre-L5 behavior).
+        pos = await build(rm, 0.20)
+        assert abs(pos.tp_price - 0.52) < 1e-5
+
+    @pytest.mark.asyncio
+    async def test_low_entry_010_tapers_tp(self, rm):
+        # entry=0.10, t=0.10/0.20=0.5 → tp_fraction=0.25+(0.40-0.25)*0.5=0.325
+        # tp_raw = 0.10 + max(0.90*0.325, 0.03) = 0.10 + 0.2925 = 0.3925
+        # (was 0.10 + 0.90*0.40 = 0.46 before L5)
+        pos = await build(rm, 0.10)
+        assert abs(pos.tp_price - 0.3925) < 1e-4
+
+    @pytest.mark.asyncio
+    async def test_taper_produces_lower_tp_than_flat_fraction(self, rm):
+        # For any entry below threshold, the tapered TP must be strictly closer
+        # to entry than the old flat-0.40 fraction would have produced.
+        for entry in [0.02, 0.05, 0.10, 0.15, 0.19]:
+            pos = await build(rm, entry, market_id=f"mkt_{entry}")
+            flat_tp = entry + (1.0 - entry) * 0.40
+            assert pos.tp_price < flat_tp, f"taper failed to lower TP at entry={entry}"
+            assert pos.tp_price > entry, f"TP must still exceed entry at {entry}"
+
+    @pytest.mark.asyncio
+    async def test_taper_disabled_when_threshold_zero(self):
+        # low_entry_threshold=0 disables the taper → full fraction at all entries.
+        rm0 = RiskManager(
+            config=RiskConfig(max_trader_allocation=1.0, low_entry_threshold=0.0),
+            bankroll=BANKROLL,
+        )
+        pos = await build(rm0, 0.10)
+        # tp = 0.10 + 0.90*0.40 = 0.46 (full fraction, no taper)
+        assert abs(pos.tp_price - 0.46) < 1e-5
 
 
 # ─── [C] Invalid Inputs ───────────────────────────────────────────────────────
@@ -401,6 +452,18 @@ class TestRecordExit:
         pos = await build(rm, 0.50, size=500.0)
         assert abs(pos.pnl_at(0.65) - 75.0) < 0.01
         assert abs(pos.pnl_at(0.40) - (-50.0)) < 0.01
+
+    @pytest.mark.asyncio
+    async def test_record_exit_resets_stale_daily_window(self, rm):
+        # M8: an exit recorded after a UTC-midnight rollover must book PnL into the
+        # NEW calendar day, not accumulate onto a stale prior-day window. Simulate a
+        # stale window by stamping _day_start_ts two days back and pre-loading a loss.
+        rm._daily_pnl = Decimal("-250.0")
+        rm._day_start_ts = time.time() - 2 * 86_400  # window belongs to two days ago
+        pos = await build(rm, 0.50, size=1_000.0)
+        await rm.record_exit(pos, 0.60)   # +100 profit, booked into the fresh window
+        # Stale -250 was discarded at the rollover; only today's +100 remains.
+        assert abs(rm.daily_pnl() - 100.0) < 0.01
 
 
 # ─── [I] Daily Loss Circuit Breaker ───────────────────────────────────────────

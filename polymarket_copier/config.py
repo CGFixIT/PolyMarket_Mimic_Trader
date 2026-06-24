@@ -52,6 +52,10 @@ class CopyTradingConfig(BaseModel):
     min_entry_price: float = 0.05
     max_entry_price: float = 0.95
     max_concurrent_positions: int = 10
+    # M9: cap concurrent open positions on any single token. Two tracked traders
+    # buying the same token would otherwise open unbounded copies on one outcome,
+    # concentrating idiosyncratic risk. 0 disables the per-token cap.
+    max_positions_per_token: int = 3
     min_market_volume: float = 5000
     # Skip trades older than this at detection time — by then the source's alpha
     # has decayed and we'd only be buying into their price impact (adverse
@@ -95,6 +99,13 @@ class RiskManagementConfig(BaseModel):
     sl_range_fraction: float = 0.25
     min_tp_abs: float = 0.03
     min_sl_abs: float = 0.02
+    # L5: at low entry prices the remaining upside range is huge (entry=0.10 →
+    # 0.90 to ceiling), so a 40%-of-range TP targets an unrealistic +360% move
+    # that rarely fills before mean-reversion. Below low_entry_threshold we taper
+    # tp_range_fraction down to low_entry_tp_fraction to set a more realistic,
+    # conservative profit target that actually gets hit.
+    low_entry_threshold: float = 0.20
+    low_entry_tp_fraction: float = 0.25
     trailing_stop_fraction: float = 0.40   # H1: loosened (was 0.15)
     time_exit_hours: float = 48.0
     time_exit_min_range_move: float = 0.10

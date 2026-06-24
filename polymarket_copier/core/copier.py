@@ -273,6 +273,19 @@ class CopyTrader:
                 logger.info("Skip: max positions (%d) reached", count)
                 return
 
+            # 7a. M9: per-token position cap. Inside the entry lock (with the global
+            #     count check) so concurrent polls can't both pass and breach it.
+            #     Prevents two tracked traders piling unbounded copies onto one token.
+            max_per_token = self.config.copy_trading.max_positions_per_token
+            if max_per_token > 0:
+                token_positions = await self.portfolio.get_positions_by_token(event.token_id)
+                if len(token_positions) >= max_per_token:
+                    logger.info(
+                        "Skip: max positions per token (%d) reached on %s",
+                        max_per_token, event.token_id[:10],
+                    )
+                    return
+
             # 8. Per-trader drawdown stop.
             trader_pnl = await self.portfolio.get_trader_pnl(event.wallet_address)
             if trader_pnl <= -(self.risk.bankroll * self.config.risk_management.drawdown_stop_pct):

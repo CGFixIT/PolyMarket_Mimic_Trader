@@ -91,6 +91,14 @@ class RiskConfig:
     tp_range_fraction: float        = 0.40   # Capture 40% of remaining upside
     sl_range_fraction: float        = 0.25   # Risk 25% of remaining downside
 
+    # --- L5: low-entry TP taper ---
+    # At low entries the remaining upside dominates (entry=0.10 → 0.90 of range to
+    # ceiling); a 40%-of-range TP demands a +360% move that rarely fills. Below
+    # low_entry_threshold we shrink the TP fraction toward low_entry_tp_fraction so
+    # the profit target is realistic and gets hit before mean-reversion.
+    low_entry_threshold: float      = 0.20
+    low_entry_tp_fraction: float    = 0.25
+
     # --- Absolute minimum distances (guard rail for extreme entries) ---
     min_tp_abs: float               = 0.03
     min_sl_abs: float               = 0.02
@@ -373,6 +381,13 @@ class RiskManager:
         """
         pnl = pos.pnl_at(exit_price)
 
+        # M8: roll the daily-loss window to the current UTC calendar day BEFORE
+        # booking this PnL. evaluate()/is_trading_halted() also reset it, but an
+        # exit can be recorded after a midnight rollover without either running
+        # first (e.g. a SOURCE_EXIT mirror), which would otherwise book today's
+        # loss against yesterday's window and skew the circuit breaker.
+        self._maybe_reset_daily_window()
+
         async with self._exposure_lock:
             self._daily_pnl += _to_dec(pnl)
             self.bankroll   += pnl
@@ -544,7 +559,19 @@ class RiskManager:
         if entry > 0.98:
             min_tp = max(min_tp, dist_ceil * 0.5)
 
-        tp_raw = entry + max(dist_ceil  * self.cfg.tp_range_fraction, min_tp)
+        # L5: taper the TP fraction for low-priced entries. Below low_entry_threshold
+        # the remaining upside is so large that the default 40%-of-range TP demands an
+        # unrealistic multi-hundred-percent move. Linearly interpolate the fraction
+        # from low_entry_tp_fraction (at entry→0) up to the full tp_range_fraction (at
+        # entry==low_entry_threshold) so the target stays achievable near the floor.
+        tp_fraction = self.cfg.tp_range_fraction
+        threshold = self.cfg.low_entry_threshold
+        if threshold > 0 and entry < threshold:
+            low_frac = self.cfg.low_entry_tp_fraction
+            t = entry / threshold   # 0 at floor, 1 at threshold
+            tp_fraction = low_frac + (self.cfg.tp_range_fraction - low_frac) * t
+
+        tp_raw = entry + max(dist_ceil  * tp_fraction, min_tp)
         sl_raw = entry - max(dist_floor * self.cfg.sl_range_fraction, min_sl)
 
         # H2: enforce minimum reward-risk ratio by capping the SL distance.

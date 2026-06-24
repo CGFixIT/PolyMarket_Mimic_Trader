@@ -105,3 +105,15 @@ class TestAppConfig:
         assert config.trader_selection.min_trades == 50
         assert config.trader_selection.half_life_days == 14.0
         assert config.trader_selection.max_top_traders == 5
+        # Chunk 2 (H14/H15/H16) trader-selection quality knobs
+        assert config.trader_selection.sharpe_cap == 3.0
+        assert config.trader_selection.sharpe_shrink_min_trades == 20
+        assert config.trader_selection.min_expectancy == 0.01
+        assert config.trader_selection.recent_window_days == 30
+
+    def test_chunk3_risk_refinement_fields(self):
+        # Chunk 3 (M9/L5) risk-refinement knobs
+        config = AppConfig()
+        assert config.copy_trading.max_positions_per_token == 3       # M9
+        assert config.risk_management.low_entry_threshold == 0.20     # L5
+        assert config.risk_management.low_entry_tp_fraction == 0.25   # L5

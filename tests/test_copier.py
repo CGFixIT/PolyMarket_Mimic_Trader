@@ -117,6 +117,40 @@ class TestHandleTradeEvent:
         assert await copier.portfolio.position_count() == 1
 
 
+class TestMaxPositionsPerToken:
+    """M9: cap concurrent open positions on a single token. Two tracked traders
+    buying the same token must not pile unbounded copies onto one outcome."""
+
+    @pytest.mark.asyncio
+    async def test_per_token_cap_blocks_excess_copies(self, copier):
+        copier.config.copy_trading.max_positions_per_token = 2
+        # Three different traders all buy the SAME token. Only 2 should open.
+        await copier.handle_trade_event(buy_event(token="tok-a", wallet="0xwhale1"))
+        await copier.handle_trade_event(buy_event(token="tok-a", wallet="0xwhale2"))
+        await copier.handle_trade_event(buy_event(token="tok-a", wallet="0xwhale3"))
+        positions = await copier.portfolio.get_positions_by_token("tok-a")
+        assert len(positions) == 2
+
+    @pytest.mark.asyncio
+    async def test_per_token_cap_independent_across_tokens(self, copier):
+        # A full token does not block copies on a DIFFERENT token.
+        copier.config.copy_trading.max_positions_per_token = 1
+        await copier.handle_trade_event(buy_event(token="tok-a", wallet="0xwhale1"))
+        await copier.handle_trade_event(buy_event(token="tok-a", wallet="0xwhale2"))
+        await copier.handle_trade_event(buy_event(token="tok-b", wallet="0xwhale3"))
+        assert len(await copier.portfolio.get_positions_by_token("tok-a")) == 1
+        assert len(await copier.portfolio.get_positions_by_token("tok-b")) == 1
+
+    @pytest.mark.asyncio
+    async def test_per_token_cap_zero_disables(self, copier):
+        # 0 disables the per-token cap entirely (only global cap applies).
+        copier.config.copy_trading.max_positions_per_token = 0
+        await copier.handle_trade_event(buy_event(token="tok-a", wallet="0xwhale1"))
+        await copier.handle_trade_event(buy_event(token="tok-a", wallet="0xwhale2"))
+        await copier.handle_trade_event(buy_event(token="tok-a", wallet="0xwhale3"))
+        assert len(await copier.portfolio.get_positions_by_token("tok-a")) == 3
+
+
 class TestOrderFailureExposureRelease:
     """When a copy order fails after exposure is reserved, that reservation must
     be released — otherwise a never-opened position permanently consumes the
