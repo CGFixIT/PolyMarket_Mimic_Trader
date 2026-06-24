@@ -126,6 +126,29 @@ class TestComputeTraderStats:
         assert stats.win_rate == 0.0
         assert stats.pnl_per_trade == []
 
+    def test_typical_trade_size_is_median_of_buys(self):
+        # M4: typical_trade_size is the median USDC notional of the trader's BUYs.
+        activity = [
+            {
+                "id": f"b{i}",
+                "type": "trade",
+                "side": "BUY",
+                "market": "m",
+                "asset": f"a{i}",
+                "price": "0.50",
+                "size": str(sz),
+                "timestamp": 1_700_000_000,
+            }
+            for i, sz in enumerate([100, 200, 900])
+        ]
+        stats = _compute_trader_stats("0xabc", "Name", 50000, activity)
+        assert stats.typical_trade_size == 200.0  # median of {100, 200, 900}, outlier-robust
+
+    def test_typical_trade_size_zero_without_buys(self):
+        # No BUY records → typical size is 0.0 (conviction signal then no-ops).
+        stats = _compute_trader_stats("0xabc", "Name", 50000, [])
+        assert stats.typical_trade_size == 0.0
+
     def test_malformed_price_is_skipped_not_fatal(self):
         # A record with a non-numeric price must be skipped silently; the valid
         # round-trip should still be counted. Robustness against dirty API data.

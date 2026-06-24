@@ -598,6 +598,64 @@ class TestSourceExitConcurrency:
         assert await copier.portfolio.position_count() == 1
 
 
+class TestConvictionSizing:
+    """M4: copy size is tilted by the whale's trade size RELATIVE to their own
+    typical (median) bet — bounded to [min, max] conviction mult — instead of
+    treating absolute USDC as the conviction proxy."""
+
+    async def _shares(self, copier):
+        positions = await copier.portfolio.get_open_positions()
+        assert len(positions) == 1
+        return positions[0].size_shares
+
+    @pytest.mark.asyncio
+    async def test_disabled_leaves_size_unchanged(self, copier):
+        # Baseline: size_multiplier 0.5 → 50 USDC / 0.50 = 100 shares.
+        copier.config.copy_trading.conviction_sizing_enabled = False
+        copier.update_tracker_typical_sizes({"0xwhale": 10.0})
+        await copier.handle_trade_event(buy_event(price=0.50, size=100.0, wallet="0xwhale"))
+        assert await self._shares(copier) == pytest.approx(100.0)
+
+    @pytest.mark.asyncio
+    async def test_high_conviction_sizes_up_capped(self, copier):
+        # typical=10, size=100 → raw mult 10 → capped at max_conviction_mult (2.0).
+        # base 50 USDC * 2.0 = 100 USDC / 0.50 = 200 shares (capped, NOT 10x).
+        copier.config.copy_trading.conviction_sizing_enabled = True
+        copier.config.copy_trading.max_conviction_mult = 2.0
+        copier.update_tracker_typical_sizes({"0xwhale": 10.0})
+        await copier.handle_trade_event(buy_event(price=0.50, size=100.0, wallet="0xwhale"))
+        assert await self._shares(copier) == pytest.approx(200.0)
+
+    @pytest.mark.asyncio
+    async def test_low_conviction_sizes_down_floored(self, copier):
+        # typical=1000, size=100 → raw mult 0.1 → floored at min_conviction_mult (0.5).
+        # base 50 USDC * 0.5 = 25 USDC / 0.50 = 50 shares.
+        copier.config.copy_trading.conviction_sizing_enabled = True
+        copier.config.copy_trading.min_conviction_mult = 0.5
+        copier.update_tracker_typical_sizes({"0xwhale": 1000.0})
+        await copier.handle_trade_event(buy_event(price=0.50, size=100.0, wallet="0xwhale"))
+        assert await self._shares(copier) == pytest.approx(50.0)
+
+    @pytest.mark.asyncio
+    async def test_unknown_typical_is_noop(self, copier):
+        # No typical-size entry for this wallet → tilt is skipped, size unchanged.
+        copier.config.copy_trading.conviction_sizing_enabled = True
+        copier.update_tracker_typical_sizes({"0xother": 10.0})
+        await copier.handle_trade_event(buy_event(price=0.50, size=100.0, wallet="0xwhale"))
+        assert await self._shares(copier) == pytest.approx(100.0)
+
+    @pytest.mark.asyncio
+    async def test_tilt_never_breaches_per_trade_cap(self, copier):
+        # Even a maxed conviction tilt is clamped by max_trade_pct (2% of 10k = 200).
+        # base from a large source trade is already capped at 200 USDC; *2.0 then
+        # re-clamped to 200 USDC / 0.50 = 400 shares (the hard ceiling holds).
+        copier.config.copy_trading.conviction_sizing_enabled = True
+        copier.config.copy_trading.max_conviction_mult = 2.0
+        copier.update_tracker_typical_sizes({"0xwhale": 10.0})
+        await copier.handle_trade_event(buy_event(price=0.50, size=100_000.0, wallet="0xwhale"))
+        assert await self._shares(copier) == pytest.approx(400.0)
+
+
 # ─── Paper fill price propagated to position entry ────────────────────────────
 
 

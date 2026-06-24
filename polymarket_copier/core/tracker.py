@@ -109,6 +109,12 @@ class TraderStats:
     # in dollars for the min_total_pnl eligibility filter.
     pnl_per_trade: List[float] = field(default_factory=list)
     last_trade_time: float = 0.0
+    # M4: the trader's TYPICAL buy notional (median USDC size of their BUY trades).
+    # Used by the copier's conviction signal to read each trade as a fraction of
+    # this trader's normal bet — a $2k trade from a trader who usually bets $200k is
+    # a throwaway, the same $2k from a $2k-typical trader is a full-conviction bet.
+    # 0.0 when no buy sizes are available (e.g. leaderboard-only stats).
+    typical_trade_size: float = 0.0
 
     @property
     def mean_pnl(self) -> float:
@@ -491,6 +497,8 @@ def _compute_trader_stats(
     """
     trade_records: List[TradeRecord] = []
     last_trade_ts = 0.0
+    # M4: every BUY notional (USDC) seen, for the trader's typical-size median.
+    buy_sizes: List[float] = []
 
     # Pair BUY and SELL events for the same market/token to estimate PnL.
     open_buys: Dict[Tuple[str, str], List[dict]] = {}
@@ -553,6 +561,8 @@ def _compute_trader_stats(
             if key not in open_buys:
                 open_buys[key] = []
             open_buys[key].append({"price": price, "size": size, "ts": ts})
+            if size > 0:
+                buy_sizes.append(size)  # M4: track notional for typical-size median
 
         elif side == "SELL" and key in open_buys and open_buys[key]:
             buy = open_buys[key].pop(0)  # FIFO matching
@@ -575,6 +585,10 @@ def _compute_trader_stats(
                 )
             )
 
+    # M4: median buy notional — robust to the occasional outlier trade. 0.0 when no
+    # buy sizes were observed (the copier's conviction signal then no-ops).
+    typical_trade_size = statistics.median(buy_sizes) if buy_sizes else 0.0
+
     if not trade_records:
         return TraderStats(
             address=address,
@@ -584,6 +598,7 @@ def _compute_trader_stats(
             win_rate=0.0,
             pnl_per_trade=[],
             last_trade_time=last_trade_ts,
+            typical_trade_size=typical_trade_size,
         )
 
     wins = sum(1 for t in trade_records if t.is_win)
@@ -598,6 +613,7 @@ def _compute_trader_stats(
         win_rate=win_rate,
         pnl_per_trade=pnl_per_trade,
         last_trade_time=last_trade_ts,
+        typical_trade_size=typical_trade_size,
     )
 
 
