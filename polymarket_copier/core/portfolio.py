@@ -59,6 +59,12 @@ CREATE TABLE IF NOT EXISTS realized_lots (
     term            TEXT NOT NULL     -- 'short' or 'long'
 );
 CREATE INDEX IF NOT EXISTS idx_realized_lots_disposed ON realized_lots (disposed_at);
+-- Cover get_trader_pnl / get_trader_win_rate (both filter trader_address + status='closed')
+-- and the Kelly sizing queries that fire on every copy decision.
+CREATE INDEX IF NOT EXISTS idx_positions_trader_status ON positions (trader_address, status);
+-- Cover get_position_by_token / get_positions_by_token (token_id + status='open')
+-- and position_count, eliminating full table scans on the per-tick exit-evaluation path.
+CREATE INDEX IF NOT EXISTS idx_positions_token_status ON positions (token_id, status);
 """
 
 
