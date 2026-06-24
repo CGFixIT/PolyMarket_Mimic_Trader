@@ -142,14 +142,38 @@ class CopyTrader:
                 return
             current_price = event.price
 
+        ct = self.config.copy_trading
+
         if event.price > 0:
-            deviation = abs(current_price - event.price) / event.price
-            if deviation > self.config.copy_trading.max_price_deviation:
+            # H6: directional deviation gate — only adverse moves (we'd pay MORE than
+            # the whale) gate the copy.  A favorable move (whale bought YES@0.40, price
+            # now 0.36) has more upside to the same TP, so it should never be rejected.
+            # We also guard against a collapsed price (>max_favorable_deviation below the
+            # whale's entry) which likely signals adverse news rather than a good fill.
+            signed_dev = (current_price - event.price) / event.price  # +ve = more expensive
+            if signed_dev > ct.max_price_deviation:
                 logger.info(
-                    "Skip: price deviation %.1f%% > max %.1f%%",
-                    deviation * 100, self.config.copy_trading.max_price_deviation * 100,
+                    "Skip: adverse price move +%.1f%% (current=%.4f whale=%.4f > max %.1f%%)",
+                    signed_dev * 100, current_price, event.price,
+                    ct.max_price_deviation * 100,
                 )
                 return
+            if signed_dev < -ct.max_favorable_deviation:
+                logger.info(
+                    "Skip: price collapsed %.1f%% below whale entry (likely adverse news)",
+                    abs(signed_dev) * 100,
+                )
+                return
+
+        # 4b. H7: entry-price band gate. Skip extreme prices where edge after fees
+        # is effectively zero: a YES at 0.97 has ~3¢ upside vs 97¢ downside,
+        # turning into a negative-EV trade after the ~2.5% round-trip cost.
+        if not (ct.min_entry_price <= current_price <= ct.max_entry_price):
+            logger.info(
+                "Skip: entry price %.4f outside band [%.2f, %.2f]",
+                current_price, ct.min_entry_price, ct.max_entry_price,
+            )
+            return
 
         # 5. Market volume check.
         if market and market.volume_24h < self.config.copy_trading.min_market_volume:
@@ -164,7 +188,6 @@ class CopyTrader:
         #    Opt-in Kelly: when enabled AND the trader has a large enough closed
         #    sample, size by fractional Kelly using their observed win rate. The
         #    max_trade_pct cap below is always enforced as a hard ceiling.
-        ct = self.config.copy_trading
         max_cap_usdc = self.risk.bankroll * ct.max_trade_pct
         copy_size_usdc = min(event.size_usdc * ct.size_multiplier, max_cap_usdc)
 

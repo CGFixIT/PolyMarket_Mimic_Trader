@@ -37,6 +37,7 @@ async def run_bot(config_path: Optional[str] = None, mode: Optional[str] = None)
         sl_range_fraction=config.risk_management.sl_range_fraction,
         min_tp_abs=config.risk_management.min_tp_abs,
         min_sl_abs=config.risk_management.min_sl_abs,
+        min_reward_risk=config.risk_management.min_reward_risk,
         trailing_stop_fraction=config.risk_management.trailing_stop_fraction,
         time_exit_hours=config.risk_management.time_exit_hours,
         time_exit_min_range_move=config.risk_management.time_exit_min_range_move,

@@ -95,8 +95,20 @@ class RiskConfig:
     min_tp_abs: float               = 0.03
     min_sl_abs: float               = 0.02
 
+    # --- Minimum reward-risk ratio (H2) ---
+    # Caps the SL distance so R:R never inverts below this floor.
+    # At entry=0.95 the raw SL distance (25% of $0.95 downside = $0.238) dwarfs
+    # the tiny upside ($0.030), giving 0.13:1 R:R — structurally negative-EV.
+    # min_reward_risk=1.0 caps SL to match the TP distance: SL=0.920 for entry=0.95.
+    min_reward_risk: float          = 1.0
+
     # --- Trailing stop ---
-    trailing_stop_fraction: float   = 0.15
+    # H1: default loosened from 0.15 → 0.40.  The old formula used (peak−hard_SL)×0.15,
+    # placing the trail 85% of the way from SL to peak.  A peak of 0.70 from entry 0.50
+    # produced trail_sl=0.651 — exiting on a ~7% pullback, which Polymarket tokens hit
+    # on normal noise.  The new formula trails from entry (run-up × fraction) and the
+    # wider default gives back 40% of the run-up before stopping out (~12% tolerance).
+    trailing_stop_fraction: float   = 0.40
 
     # --- Time-based exit ---
     time_exit_hours: float          = 48.0
@@ -533,6 +545,19 @@ class RiskManager:
         tp_raw = entry + max(dist_ceil  * self.cfg.tp_range_fraction, min_tp)
         sl_raw = entry - max(dist_floor * self.cfg.sl_range_fraction, min_sl)
 
+        # H2: enforce minimum reward-risk ratio by capping the SL distance.
+        # At high entries (e.g. 0.95) the 25%-of-downside SL dominates the tiny
+        # upside, inverting R:R to 0.13:1 and making the trade structurally
+        # negative-EV before fees.  Shrink SL distance to match the TP distance
+        # (or 1/min_reward_risk of it) so the floor R:R is always respected.
+        if self.cfg.min_reward_risk > 0:
+            tp_dist = tp_raw - entry
+            if tp_dist > 0:
+                max_sl_dist = tp_dist / self.cfg.min_reward_risk
+                sl_dist = entry - sl_raw
+                if sl_dist > max_sl_dist:
+                    sl_raw = entry - max_sl_dist
+
         tp = min(tp_raw, 1.0)
         sl = max(sl_raw, 0.0)
 
@@ -545,15 +570,24 @@ class RiskManager:
         return round(tp, 6), round(sl, 6)
 
     def _compute_trail_sl(self, pos: Position, peak_override: Optional[float] = None) -> float:
-        """
-        Trailing SL = peak − (peak − hard_SL) × trailing_fraction.
-        Never drops below the hard SL.
+        """Trailing SL anchored to the entry-price run-up, not the hard SL gap.
+
+        H1 fix: the old formula `peak − (peak − hard_SL) × fraction` placed the
+        trail 85 % of the way from hard SL to peak with fraction=0.15, producing
+        a ~5–7 % pullback tolerance — easily hit by Polymarket price noise.  The
+        new formula gives back a fixed fraction of the run-up from entry:
+
+            trail_sl = peak − run_up × trailing_stop_fraction
+
+        With the new default fraction=0.40 and peak=0.70, entry=0.50 →
+        trail_sl = 0.70 − 0.20×0.40 = 0.62  (~12 % pullback tolerance).
+        Never drops below the hard SL (fail-safe floor).
         """
         assert pos.sl_price is not None
         assert pos.peak_price is not None
         peak     = peak_override if peak_override is not None else pos.peak_price
-        gap      = peak - pos.sl_price
-        trail_sl = peak - (gap * self.cfg.trailing_stop_fraction)
+        run_up   = peak - pos.entry_price
+        trail_sl = peak - run_up * self.cfg.trailing_stop_fraction
         return max(trail_sl, pos.sl_price)
 
     def _assert_exposure_cap(self, market_id: str, new_value: float) -> None:

@@ -33,6 +33,16 @@ class CopyTradingConfig(BaseModel):
     max_trade_pct: float = 0.02
     max_trader_allocation: float = 0.05
     max_price_deviation: float = 0.02
+    # H6: only adverse price moves (we'd pay more than the whale) gate the copy.
+    # A favorable move (whale bought at 0.40, price now 0.36) is never rejected —
+    # it's a better entry with more upside, not a reason to skip.
+    # max_favorable_deviation caps collapsed prices (likely adverse news): if price
+    # dropped more than 15% below the whale's entry we skip (probable signal decay).
+    max_favorable_deviation: float = 0.15
+    # H7: entry-price band gate — skip tokens trading at extreme prices where
+    # edge after fees vanishes (0.97+ YES has ~3¢ upside vs 97¢ downside).
+    min_entry_price: float = 0.05
+    max_entry_price: float = 0.95
     max_concurrent_positions: int = 10
     min_market_volume: float = 5000
     # Skip trades older than this at detection time — by then the source's alpha
@@ -73,9 +83,10 @@ class RiskManagementConfig(BaseModel):
     sl_range_fraction: float = 0.25
     min_tp_abs: float = 0.03
     min_sl_abs: float = 0.02
-    trailing_stop_fraction: float = 0.15
+    trailing_stop_fraction: float = 0.40   # H1: loosened (was 0.15)
     time_exit_hours: float = 48.0
     time_exit_min_range_move: float = 0.10
+    min_reward_risk: float = 1.0           # H2: floor R:R ratio (SL capped to TP dist / ratio)
     daily_loss_limit_pct: float = 0.03
     max_market_exposure_pct: float = 0.08
     resolution_blackout_hours: float = 24.0

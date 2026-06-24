@@ -75,9 +75,12 @@ class TestThresholdComputation:
 
     @pytest.mark.asyncio
     async def test_high_entry_0_82(self, rm):
+        # H2: min_reward_risk=1.0 caps SL distance to the TP distance.
+        # tp_dist = 0.892 - 0.82 = 0.072; raw sl_dist = 0.205 → capped to 0.072.
+        # SL = 0.82 - 0.072 = 0.748  (was 0.615 before the R:R floor fix).
         pos = await build(rm, 0.82)
         assert abs(pos.tp_price - 0.892) < 1e-5
-        assert abs(pos.sl_price - 0.615) < 1e-5
+        assert abs(pos.sl_price - 0.748) < 1e-5
         assert pos.tp_price <= 1.0
 
     @pytest.mark.asyncio
@@ -140,8 +143,9 @@ class TestNearBoundaryEntries:
 
     @pytest.mark.asyncio
     async def test_near_ceiling_0_97_sl_large_downside(self, rm):
+        # H2: tp_dist=0.03 (clamped to 1.0), max_sl_dist=0.03/1.0=0.03 → SL=0.94 (was 0.7275)
         pos = await build(rm, 0.97)
-        assert abs(pos.sl_price - 0.7275) < 1e-4
+        assert abs(pos.sl_price - 0.94) < 1e-4
 
     @pytest.mark.asyncio
     async def test_near_ceiling_0_99_tp_clamped(self, rm):
@@ -150,9 +154,10 @@ class TestNearBoundaryEntries:
 
     @pytest.mark.asyncio
     async def test_entry_exactly_1_00(self, rm):
+        # H2: tp_raw=1.03→clamped 1.0, tp_dist computed pre-clamp=0.03 → SL=0.97 (was 0.75)
         pos = await build(rm, 1.00)
         assert pos.tp_price == 1.0
-        assert abs(pos.sl_price - 0.75) < 1e-5
+        assert abs(pos.sl_price - 0.97) < 1e-5
 
     @pytest.mark.asyncio
     async def test_near_ceiling_0_95(self, rm):
@@ -298,9 +303,11 @@ class TestTrailingStop:
 
     @pytest.mark.asyncio
     async def test_trailing_sl_math_explicit(self, rm):
+        # H1: trail anchors to run-up from entry (peak - entry), not gap to SL.
+        # entry=0.50, peak=0.80, fraction=0.40 → trail = 0.80 - 0.30*0.40 = 0.68
         pos = await build(rm, 0.50)
-        pos.peak_price = 0.80  # caller sets after a new high at 0.80
-        expected_trail = 0.80 - ((0.80 - pos.sl_price) * CFG.trailing_stop_fraction)
+        pos.peak_price = 0.80
+        expected_trail = 0.80 - ((0.80 - pos.entry_price) * CFG.trailing_stop_fraction)
         assert abs(rm._compute_trail_sl(pos) - expected_trail) < 1e-5
 
     @pytest.mark.asyncio
