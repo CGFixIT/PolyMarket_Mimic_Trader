@@ -41,9 +41,7 @@ class DataClient:
             if self._session is None or self._session.closed:
                 self._session = aiohttp.ClientSession(
                     timeout=aiohttp.ClientTimeout(total=10),
-                    connector=aiohttp.TCPConnector(
-                        limit=_CONN_LIMIT, keepalive_timeout=_KEEPALIVE_TIMEOUT
-                    ),
+                    connector=aiohttp.TCPConnector(limit=_CONN_LIMIT, keepalive_timeout=_KEEPALIVE_TIMEOUT),
                 )
         return self._session
 

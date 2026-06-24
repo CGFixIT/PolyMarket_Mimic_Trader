@@ -19,7 +19,11 @@ from polymarket_copier.core.tracker import (
 
 
 def make_stats(
-    pnl=50000, win_rate=0.65, trades=200, pnl_list=None, last_trade=None,
+    pnl=50000,
+    win_rate=0.65,
+    trades=200,
+    pnl_list=None,
+    last_trade=None,
 ) -> TraderStats:
     if pnl_list is None:
         pnl_list = [10.0, -5.0, 20.0, 15.0, -8.0]
@@ -88,8 +92,8 @@ class TestTraderScorer:
 
     def test_recency_weight_decays(self):
         scorer = TraderScorer(TrackerConfig(half_life_days=14))
-        recent = scorer._recency_weight(time.time() - 3600)       # ~1.0
-        old = scorer._recency_weight(time.time() - 14 * 86400)    # ~0.5
+        recent = scorer._recency_weight(time.time() - 3600)  # ~1.0
+        old = scorer._recency_weight(time.time() - 14 * 86400)  # ~0.5
         assert recent > old
         assert abs(old - 0.5) < 0.05
 
@@ -126,15 +130,36 @@ class TestComputeTraderStats:
         # A record with a non-numeric price must be skipped silently; the valid
         # round-trip should still be counted. Robustness against dirty API data.
         activity = [
-            {"id": "bad", "type": "trade", "side": "BUY", "market": "m",
-             "asset": "a", "price": "not-a-number", "size": "10",
-             "timestamp": 1_700_000_000},
-            {"id": "b1", "type": "trade", "side": "BUY", "market": "m",
-             "asset": "a", "price": "0.50", "size": "100",
-             "timestamp": 1_700_000_000},
-            {"id": "s1", "type": "trade", "side": "SELL", "market": "m",
-             "asset": "a", "price": "0.60", "size": "60",
-             "timestamp": 1_700_001_000},
+            {
+                "id": "bad",
+                "type": "trade",
+                "side": "BUY",
+                "market": "m",
+                "asset": "a",
+                "price": "not-a-number",
+                "size": "10",
+                "timestamp": 1_700_000_000,
+            },
+            {
+                "id": "b1",
+                "type": "trade",
+                "side": "BUY",
+                "market": "m",
+                "asset": "a",
+                "price": "0.50",
+                "size": "100",
+                "timestamp": 1_700_000_000,
+            },
+            {
+                "id": "s1",
+                "type": "trade",
+                "side": "SELL",
+                "market": "m",
+                "asset": "a",
+                "price": "0.60",
+                "size": "60",
+                "timestamp": 1_700_001_000,
+            },
         ]
         stats = _compute_trader_stats("0xabc", "Name", 50000, activity)
         assert stats.trade_count == 1
@@ -142,8 +167,7 @@ class TestComputeTraderStats:
 
     def test_non_trade_types_ignored(self):
         activity = [
-            {"id": "x", "type": "transfer", "side": "BUY", "market": "m",
-             "asset": "a", "price": "0.5", "size": "10"},
+            {"id": "x", "type": "transfer", "side": "BUY", "market": "m", "asset": "a", "price": "0.5", "size": "10"},
         ]
         stats = _compute_trader_stats("0xabc", "Name", 50000, activity)
         assert stats.pnl_per_trade == []
@@ -152,11 +176,25 @@ class TestComputeTraderStats:
         # Held-to-resolution: buy a token at 0.50, redeem at $1.00 payout.
         # 100 / 0.50 = 200 shares; pnl = (1.0 - 0.5) * 200 = 100.0.
         activity = [
-            {"id": "b1", "type": "trade", "side": "BUY", "market": "m",
-             "asset": "a", "price": "0.50", "size": "100",
-             "timestamp": 1_700_000_000},
-            {"id": "r1", "type": "redeem", "market": "m", "asset": "a",
-             "price": "1.0", "size": "200", "timestamp": 1_700_002_000},
+            {
+                "id": "b1",
+                "type": "trade",
+                "side": "BUY",
+                "market": "m",
+                "asset": "a",
+                "price": "0.50",
+                "size": "100",
+                "timestamp": 1_700_000_000,
+            },
+            {
+                "id": "r1",
+                "type": "redeem",
+                "market": "m",
+                "asset": "a",
+                "price": "1.0",
+                "size": "200",
+                "timestamp": 1_700_002_000,
+            },
         ]
         stats = _compute_trader_stats("0xabc", "Name", 50000, activity)
         assert stats.trade_count == 1
@@ -168,11 +206,17 @@ class TestComputeTraderStats:
     def test_redeem_defaults_to_payout_one_when_no_price(self):
         # No explicit per-share price on the redeem record → default to 1.0.
         activity = [
-            {"id": "b1", "type": "trade", "side": "BUY", "market": "m",
-             "asset": "a", "price": "0.40", "size": "40",
-             "timestamp": 1_700_000_000},
-            {"id": "r1", "type": "claim", "market": "m", "asset": "a",
-             "timestamp": 1_700_002_000},
+            {
+                "id": "b1",
+                "type": "trade",
+                "side": "BUY",
+                "market": "m",
+                "asset": "a",
+                "price": "0.40",
+                "size": "40",
+                "timestamp": 1_700_000_000,
+            },
+            {"id": "r1", "type": "claim", "market": "m", "asset": "a", "timestamp": 1_700_002_000},
         ]
         stats = _compute_trader_stats("0xabc", "Name", 50000, activity)
         assert stats.trade_count == 1
@@ -184,9 +228,16 @@ class TestComputeTraderStats:
     def test_buy_without_sell_or_redeem_not_counted(self):
         # Unchanged behavior: an open buy with no realizing event is excluded.
         activity = [
-            {"id": "b1", "type": "trade", "side": "BUY", "market": "m",
-             "asset": "a", "price": "0.50", "size": "100",
-             "timestamp": 1_700_000_000},
+            {
+                "id": "b1",
+                "type": "trade",
+                "side": "BUY",
+                "market": "m",
+                "asset": "a",
+                "price": "0.50",
+                "size": "100",
+                "timestamp": 1_700_000_000,
+            },
         ]
         stats = _compute_trader_stats("0xabc", "Name", 50000, activity)
         # No realizing event → no TradeRecord produced (no win/loss credited).
@@ -199,17 +250,45 @@ class TestComputeTraderStats:
         # One actively-sold round-trip plus one held-to-resolution redeem on a
         # different market — both must be counted.
         activity = [
-            {"id": "b1", "type": "trade", "side": "BUY", "market": "m1",
-             "asset": "a1", "price": "0.50", "size": "100",
-             "timestamp": 1_700_000_000},
-            {"id": "s1", "type": "trade", "side": "SELL", "market": "m1",
-             "asset": "a1", "price": "0.60", "size": "60",
-             "timestamp": 1_700_001_000},
-            {"id": "b2", "type": "trade", "side": "BUY", "market": "m2",
-             "asset": "a2", "price": "0.20", "size": "20",
-             "timestamp": 1_700_000_500},
-            {"id": "r2", "type": "redeem", "market": "m2", "asset": "a2",
-             "price": "1.0", "size": "100", "timestamp": 1_700_003_000},
+            {
+                "id": "b1",
+                "type": "trade",
+                "side": "BUY",
+                "market": "m1",
+                "asset": "a1",
+                "price": "0.50",
+                "size": "100",
+                "timestamp": 1_700_000_000,
+            },
+            {
+                "id": "s1",
+                "type": "trade",
+                "side": "SELL",
+                "market": "m1",
+                "asset": "a1",
+                "price": "0.60",
+                "size": "60",
+                "timestamp": 1_700_001_000,
+            },
+            {
+                "id": "b2",
+                "type": "trade",
+                "side": "BUY",
+                "market": "m2",
+                "asset": "a2",
+                "price": "0.20",
+                "size": "20",
+                "timestamp": 1_700_000_500,
+            },
+            {
+                "id": "r2",
+                "type": "redeem",
+                "market": "m2",
+                "asset": "a2",
+                "price": "1.0",
+                "size": "100",
+                "timestamp": 1_700_003_000,
+            },
         ]
         stats = _compute_trader_stats("0xabc", "Name", 50000, activity)
         assert stats.trade_count == 2
@@ -226,36 +305,45 @@ class TestReturnsBasedScoring:
     def _round_trip(market, entry_price, notional_usdc, exit_price):
         """One BUY/SELL pair. notional_usdc = entry_price * shares (cost basis)."""
         return [
-            {"id": f"b-{market}", "type": "trade", "side": "BUY",
-             "market": market, "asset": f"tok-{market}",
-             "price": str(entry_price), "size": str(notional_usdc),
-             "timestamp": 1_700_000_000},
-            {"id": f"s-{market}", "type": "trade", "side": "SELL",
-             "market": market, "asset": f"tok-{market}",
-             "price": str(exit_price), "size": "1", "timestamp": 1_700_001_000},
+            {
+                "id": f"b-{market}",
+                "type": "trade",
+                "side": "BUY",
+                "market": market,
+                "asset": f"tok-{market}",
+                "price": str(entry_price),
+                "size": str(notional_usdc),
+                "timestamp": 1_700_000_000,
+            },
+            {
+                "id": f"s-{market}",
+                "type": "trade",
+                "side": "SELL",
+                "market": market,
+                "asset": f"tok-{market}",
+                "price": str(exit_price),
+                "size": "1",
+                "timestamp": 1_700_001_000,
+            },
         ]
 
     def test_roi_stored_not_dollars(self):
         # Buy 100 USDC @ 0.50 -> 200 shares; sell @ 0.65.
         # dollars = (0.65-0.50)*200 = 30; cost_basis = 0.50*200 = 100; roi = 0.30
-        stats = _compute_trader_stats(
-            "0xabc", "Name", 50000, self._round_trip("m", 0.50, 100, 0.65)
-        )
+        stats = _compute_trader_stats("0xabc", "Name", 50000, self._round_trip("m", 0.50, 100, 0.65))
         assert stats.pnl_per_trade == [pytest.approx(0.30)]
 
     def test_same_roi_different_notionals_is_size_independent(self):
         # Three +10% trades on wildly different notionals must yield identical
         # per-trade returns, proving the score no longer tracks position size.
         activity = (
-            self._round_trip("small", 0.20, 10, 0.22)      # +10%
+            self._round_trip("small", 0.20, 10, 0.22)  # +10%
             + self._round_trip("medium", 0.50, 1_000, 0.55)  # +10%
             + self._round_trip("large", 0.80, 100_000, 0.88)  # +10%
         )
         stats = _compute_trader_stats("0xabc", "Name", 50000, activity)
         assert stats.trade_count == 3
-        assert stats.pnl_per_trade == [
-            pytest.approx(0.10), pytest.approx(0.10), pytest.approx(0.10)
-        ]
+        assert stats.pnl_per_trade == [pytest.approx(0.10), pytest.approx(0.10), pytest.approx(0.10)]
         # Identical returns -> zero variance, positive mean.
         assert stats.mean_pnl == pytest.approx(0.10)
         assert stats.stddev_pnl == pytest.approx(0.0)
@@ -264,29 +352,23 @@ class TestReturnsBasedScoring:
     def test_mean_stddev_sharpe_reflect_returns(self):
         # +20% then -10% round-trips.
         activity = (
-            self._round_trip("a", 0.50, 1_000, 0.60)   # +20%
+            self._round_trip("a", 0.50, 1_000, 0.60)  # +20%
             + self._round_trip("b", 0.50, 1_000, 0.45)  # -10%
         )
         stats = _compute_trader_stats("0xabc", "Name", 50000, activity)
         assert stats.pnl_per_trade == [pytest.approx(0.20), pytest.approx(-0.10)]
         assert stats.mean_pnl == pytest.approx(0.05)
         # sharpe = mean / stddev, both on returns
-        assert stats.sharpe_proxy == pytest.approx(
-            stats.mean_pnl / stats.stddev_pnl
-        )
+        assert stats.sharpe_proxy == pytest.approx(stats.mean_pnl / stats.stddev_pnl)
 
     def test_loss_has_negative_roi_and_not_a_win(self):
-        stats = _compute_trader_stats(
-            "0xabc", "Name", 50000, self._round_trip("m", 0.50, 100, 0.40)
-        )
+        stats = _compute_trader_stats("0xabc", "Name", 50000, self._round_trip("m", 0.50, 100, 0.40))
         assert stats.pnl_per_trade == [pytest.approx(-0.20)]
         assert stats.win_rate == 0.0
 
     def test_total_pnl_stays_dollar_aggregate(self):
         # total_pnl is the leaderboard dollar figure, untouched by ROI scoring.
-        stats = _compute_trader_stats(
-            "0xabc", "Name", 50000, self._round_trip("m", 0.50, 100, 0.65)
-        )
+        stats = _compute_trader_stats("0xabc", "Name", 50000, self._round_trip("m", 0.50, 100, 0.65))
         assert stats.total_pnl == 50000
         # ...while per-trade values are fractional returns, not dollars.
         assert max(stats.pnl_per_trade) < 1.0
@@ -294,9 +376,7 @@ class TestReturnsBasedScoring:
 
 class TestParseTimestamp:
     def test_iso_string(self):
-        assert _parse_timestamp("2023-11-14T22:13:20+00:00") == pytest.approx(
-            1_700_000_000, abs=1
-        )
+        assert _parse_timestamp("2023-11-14T22:13:20+00:00") == pytest.approx(1_700_000_000, abs=1)
 
     def test_invalid_string_returns_current_time(self):
         before = time.time()
@@ -305,9 +385,7 @@ class TestParseTimestamp:
         assert before <= result <= after
 
     def test_millis_normalized_to_seconds(self):
-        assert _parse_timestamp(1_700_000_000_000) == pytest.approx(
-            1_700_000_000, abs=1
-        )
+        assert _parse_timestamp(1_700_000_000_000) == pytest.approx(1_700_000_000, abs=1)
 
     def test_seconds_passthrough(self):
         assert _parse_timestamp(1_700_000_000) == pytest.approx(1_700_000_000)
@@ -331,14 +409,17 @@ class TestRefreshPipeline:
             {"name": "0xB", "pnl": 40000, "pseudonym": "B"},
         ]
         recent_window = [{"name": "0xA", "pnl": 30000}]  # only 0xA in BOTH windows
-        with patch.object(
-            client, "_fetch_dual_leaderboards",
-            new=AsyncMock(return_value=(all_window, recent_window)),
-        ), patch.object(
-            client, "_build_trader_stats",
-            new=AsyncMock(side_effect=lambda session, entry: make_stats(
-                pnl_list=[10.0, 12.0, 11.0, 13.0]
-            )),
+        with (
+            patch.object(
+                client,
+                "_fetch_dual_leaderboards",
+                new=AsyncMock(return_value=(all_window, recent_window)),
+            ),
+            patch.object(
+                client,
+                "_build_trader_stats",
+                new=AsyncMock(side_effect=lambda session, entry: make_stats(pnl_list=[10.0, 12.0, 11.0, 13.0])),
+            ),
         ):
             result = await client.refresh()
         # 0xB filtered out (not in recent window); 0xA survives and is ranked.
@@ -351,7 +432,8 @@ class TestRefreshPipeline:
     async def test_refresh_empty_when_a_window_is_empty(self):
         client = TrackerClient()
         with patch.object(
-            client, "_fetch_dual_leaderboards",
+            client,
+            "_fetch_dual_leaderboards",
             new=AsyncMock(return_value=([], [{"name": "0xA"}])),
         ):
             assert await client.refresh() == []
@@ -360,10 +442,14 @@ class TestRefreshPipeline:
     async def test_refresh_empty_when_no_window_overlap(self):
         client = TrackerClient()
         with patch.object(
-            client, "_fetch_dual_leaderboards",
-            new=AsyncMock(return_value=(
-                [{"name": "0xA", "pnl": 50000}], [{"name": "0xZ", "pnl": 50000}],
-            )),
+            client,
+            "_fetch_dual_leaderboards",
+            new=AsyncMock(
+                return_value=(
+                    [{"name": "0xA", "pnl": 50000}],
+                    [{"name": "0xZ", "pnl": 50000}],
+                )
+            ),
         ):
             # Disjoint windows → no candidates survive the intersection.
             assert await client.refresh() == []
@@ -382,11 +468,17 @@ class TestRefreshPipeline:
                 raise RuntimeError("activity fetch failed")
             return make_stats(pnl_list=[10.0, 12.0, 11.0, 13.0])
 
-        with patch.object(
-            client, "_fetch_dual_leaderboards",
-            new=AsyncMock(return_value=(all_window, recent_window)),
-        ), patch.object(
-            client, "_build_trader_stats", new=AsyncMock(side_effect=stats_or_fail),
+        with (
+            patch.object(
+                client,
+                "_fetch_dual_leaderboards",
+                new=AsyncMock(return_value=(all_window, recent_window)),
+            ),
+            patch.object(
+                client,
+                "_build_trader_stats",
+                new=AsyncMock(side_effect=stats_or_fail),
+            ),
         ):
             result = await client.refresh()
         # 0xB's exception is swallowed (gather return_exceptions); 0xA still ranked.

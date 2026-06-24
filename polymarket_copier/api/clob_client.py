@@ -73,10 +73,9 @@ class ClobClient:
         # Dedicated thread pool for blocking CLOB calls (signing + HTTP).
         # Not created in paper mode — there are no blocking calls there.
         self._executor: Optional[concurrent.futures.ThreadPoolExecutor] = (
-            None if self.paper_mode
-            else concurrent.futures.ThreadPoolExecutor(
-                max_workers=2, thread_name_prefix="clob-signer"
-            )
+            None
+            if self.paper_mode
+            else concurrent.futures.ThreadPoolExecutor(max_workers=2, thread_name_prefix="clob-signer")
         )
 
     async def _run_blocking(self, fn) -> Any:
@@ -106,20 +105,22 @@ class ClobClient:
                 )
                 if self.config.api_key and self.config.api_secret:
                     self._client.set_api_creds(
-                        type("Creds", (), {
-                            "api_key": self.config.api_key,
-                            "api_secret": self.config.api_secret,
-                            "api_passphrase": self.config.api_passphrase,
-                        })()
+                        type(
+                            "Creds",
+                            (),
+                            {
+                                "api_key": self.config.api_key,
+                                "api_secret": self.config.api_secret,
+                                "api_passphrase": self.config.api_passphrase,
+                            },
+                        )()
                     )
                 else:
                     creds = self._client.create_or_derive_api_creds()
                     self._client.set_api_creds(creds)
                 logger.info("Live CLOB client initialized")
             except ImportError:
-                raise ImportError(
-                    "py-clob-client required for live trading: pip install py-clob-client"
-                ) from None
+                raise ImportError("py-clob-client required for live trading: pip install py-clob-client") from None
 
     async def get_order_book(self, token_id: str) -> dict[str, Any]:
         """Return the order book for a token (a synthetic book in paper mode)."""
@@ -129,9 +130,7 @@ class ClobClient:
                 "asks": [{"price": "0.51", "size": "10000"}],
             }
         # C1: run in thread pool so the HTTP GET doesn't stall the event loop.
-        return await self._run_blocking(
-            functools.partial(self._get_order_book_sync, token_id)
-        )
+        return await self._run_blocking(functools.partial(self._get_order_book_sync, token_id))
 
     def _get_order_book_sync(self, token_id: str) -> dict[str, Any]:
         self._init_live_client()
@@ -144,7 +143,7 @@ class ClobClient:
         unchanged), then grows as 1 + coeff*(sqrt(size/threshold) - 1), clamped to
         [1, slippage_size_max_mult]. coeff=0 disables scaling entirely.
         """
-        ct  = self.config.copy_trading
+        ct = self.config.copy_trading
         thr = ct.slippage_size_threshold_usdc
         coeff = ct.slippage_size_coeff
         if coeff <= 0.0 or thr <= 0.0 or size_usdc <= thr:
@@ -168,26 +167,25 @@ class ClobClient:
         for the needed shares exceeds the cap is intrinsically size-aware: a large
         order's deeper VWAP organically breaches the (base) cap.
         """
-        slippage_cap  = self.config.copy_trading.max_live_slippage_pct
-        asks          = book.get("asks", [])
-        max_price     = price * (1.0 + slippage_cap)
+        slippage_cap = self.config.copy_trading.max_live_slippage_pct
+        asks = book.get("asks", [])
+        max_price = price * (1.0 + slippage_cap)
         needed_shares = size_usdc / max(price, 1e-6)
 
         filled = 0.0
-        cost   = 0.0
+        cost = 0.0
         for level in sorted(asks, key=lambda lvl: float(lvl.get("price", 0))):
             level_price = float(level.get("price", 0))
-            level_size  = float(level.get("size", 0))
+            level_size = float(level.get("size", 0))
             take = min(level_size, needed_shares - filled)
             if take <= 0.0:
                 break
             filled += take
-            cost   += take * level_price
+            cost += take * level_price
 
         if filled < needed_shares:
             raise InsufficientLiquidityError(
-                f"Insufficient liquidity: need {needed_shares:.2f} shares, "
-                f"ask side only holds {filled:.2f} shares"
+                f"Insufficient liquidity: need {needed_shares:.2f} shares, ask side only holds {filled:.2f} shares"
             )
         vwap = cost / filled if filled > 0 else float("inf")
         if vwap > max_price:
@@ -217,7 +215,7 @@ class ClobClient:
             # live) so paper PnL reflects the deeper book-walk of large orders. Fee
             # is linear and size-independent, so it is NOT scaled.
             slip = self.config.copy_trading.paper_fill_slippage_pct * self._size_multiplier(order.size_usdc)
-            fee  = self.config.copy_trading.paper_taker_fee_pct
+            fee = self.config.copy_trading.paper_taker_fee_pct
             cost = slip + fee
             if order.side == "BUY":
                 fill_price = min(order.price * (1.0 + cost), 1.0)
@@ -235,8 +233,12 @@ class ClobClient:
             }
             logger.info(
                 "[PAPER] Order: %s $%.2f @ %.4f (fill %.4f, %.1f%% slip+fee) on %s",
-                order.side, order.size_usdc, order.price, fill_price,
-                cost * 100, order.market_id,
+                order.side,
+                order.size_usdc,
+                order.price,
+                fill_price,
+                cost * 100,
+                order.market_id,
             )
             return result
 
@@ -260,6 +262,7 @@ class ClobClient:
         def _place_sync() -> Any:
             self._init_live_client()
             from py_clob_client.order_builder.constants import BUY as CLOB_BUY, SELL as CLOB_SELL
+
             side = CLOB_BUY if order.side == "BUY" else CLOB_SELL
             kwargs: dict[str, Any] = dict(
                 token_id=order.token_id,
@@ -270,6 +273,7 @@ class ClobClient:
             # Wire the order type through; graceful fallback if clob_types unavailable.
             try:
                 from py_clob_client.clob_types import OrderType
+
                 otype = {
                     "GTC": OrderType.GTC,
                     "FOK": OrderType.FOK,
@@ -284,7 +288,12 @@ class ClobClient:
         signed_order = await self._run_blocking(_place_sync)
         logger.info(
             "[LIVE] Order: %s %s $%.2f @ %.4f (exec %.4f) -> %s",
-            order.order_type, order.side, order.size_usdc, order.price, exec_price, signed_order,
+            order.order_type,
+            order.side,
+            order.size_usdc,
+            order.price,
+            exec_price,
+            signed_order,
         )
         # M12: surface order_id + fill fields at the TOP level so _reconcile_fill can
         # read them (the old {"result": signed_order} nesting hid them, so live fills
@@ -328,6 +337,7 @@ class ClobClient:
         if self.paper_mode:
             logger.info("[PAPER] Cancel: %s", order_id)
             return True
+
         # C1: cancellations are also blocking HTTP calls.
         def _cancel_sync() -> None:
             self._init_live_client()
@@ -404,7 +414,9 @@ class ClobClient:
 
         logger.info(
             "M12: retrying unfilled remainder %.2f/%.2f shares at wider slippage %.1f%%",
-            remaining, intended_shares, ct.live_retry_slippage_pct * 100,
+            remaining,
+            intended_shares,
+            ct.live_retry_slippage_pct * 100,
         )
         retry_order = order.model_copy(update={"size_usdc": remaining * order.price})
         retry = await self.place_order(retry_order, slippage_override=ct.live_retry_slippage_pct)
@@ -413,10 +425,7 @@ class ClobClient:
         total_filled = confirmed + retry_filled
         avg1 = float(result.get("avg_price") or order.price)
         avg2 = float(retry.get("avg_price") or order.price)
-        merged_avg = (
-            (confirmed * avg1 + retry_filled * avg2) / total_filled
-            if total_filled > 0 else order.price
-        )
+        merged_avg = (confirmed * avg1 + retry_filled * avg2) / total_filled if total_filled > 0 else order.price
         return {
             "status": "LIVE",
             "order_id": retry.get("order_id"),
@@ -429,6 +438,7 @@ class ClobClient:
         """Return the available USDC balance (configured bankroll in paper mode, None on error)."""
         if self.paper_mode:
             return self.config.bankroll
+
         def _balance_sync() -> float:
             self._init_live_client()
             return float(self._client.get_balance())

@@ -106,15 +106,16 @@ class CopyTradingConfig(BaseModel):
         if self.live_order_max_retries not in (0, 1):
             raise ValueError("live_order_max_retries must be 0 or 1")
         return self
+
     # Paper-mode fill simulation: apply half-spread slippage + taker fee so
     # paper PnL reflects live execution costs rather than zero-cost fills.
-    paper_fill_slippage_pct: float = 0.005   # ~0.5% half-spread
-    paper_taker_fee_pct: float = 0.02         # Polymarket CLOB taker fee
+    paper_fill_slippage_pct: float = 0.005  # ~0.5% half-spread
+    paper_taker_fee_pct: float = 0.02  # Polymarket CLOB taker fee
     # Live-mode slippage cap: reject a BUY if no ask depth exists within this
     # fraction of the requested price. Prevents inadvertently paying far above
     # the quoted price when the order book is thin or the market moves fast.
     # Must match or exceed paper_fill_slippage_pct so live/paper parity holds.
-    max_live_slippage_pct: float = 0.01       # 1% max walk above order price
+    max_live_slippage_pct: float = 0.01  # 1% max walk above order price
     # M11: size-aware slippage. A flat cap under-prices market impact for large
     # orders (a $5000 order walks far deeper into the book than a $50 one). For
     # orders above slippage_size_threshold_usdc, the EXEC-price slippage and the
@@ -171,10 +172,10 @@ class RiskManagementConfig(BaseModel):
     # conservative profit target that actually gets hit.
     low_entry_threshold: float = 0.20
     low_entry_tp_fraction: float = 0.25
-    trailing_stop_fraction: float = 0.40   # H1: loosened (was 0.15)
+    trailing_stop_fraction: float = 0.40  # H1: loosened (was 0.15)
     time_exit_hours: float = 48.0
     time_exit_min_range_move: float = 0.10
-    min_reward_risk: float = 1.0           # H2: floor R:R ratio (SL capped to TP dist / ratio)
+    min_reward_risk: float = 1.0  # H2: floor R:R ratio (SL capped to TP dist / ratio)
     daily_loss_limit_pct: float = 0.03
     max_market_exposure_pct: float = 0.08
     resolution_blackout_hours: float = 24.0
@@ -257,9 +258,7 @@ def load_config(
         try:
             config.bankroll = float(bankroll_str)
         except ValueError:
-            raise ConfigError(
-                f"BANKROLL must be a number, got: {bankroll_str!r}"
-            ) from None
+            raise ConfigError(f"BANKROLL must be a number, got: {bankroll_str!r}") from None
 
     if config.bankroll <= 0:
         raise ConfigError("BANKROLL must be positive")

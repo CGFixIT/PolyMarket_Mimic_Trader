@@ -30,6 +30,7 @@ logger = logging.getLogger("polymarket_copier")
 # sites below still resolve (the kind arg is only used when _PROM_AVAILABLE).
 try:
     from prometheus_client import Counter, Gauge, Histogram, start_http_server
+
     _PROM_AVAILABLE = True
 except ImportError:
     Counter = Gauge = Histogram = None  # type: ignore[assignment,misc]
@@ -73,49 +74,74 @@ BANKROLL = _make(Gauge, "copybot_bankroll_usd", "Current bankroll in USDC.")
 DAILY_PNL = _make(Gauge, "copybot_daily_pnl_usd", "Realized PnL in the current UTC day (resets at midnight UTC).")
 OPEN_POSITIONS = _make(Gauge, "copybot_open_positions", "Number of currently open copy-trade positions.")
 OPEN_UNREALIZED_PNL = _make(
-    Gauge, "copybot_open_unrealized_pnl_usd",
+    Gauge,
+    "copybot_open_unrealized_pnl_usd",
     "Conservative (SL-based) mark-to-market unrealized PnL across open positions; <= 0.",
 )
 TOTAL_EXPOSURE = _make(Gauge, "copybot_total_exposure_usd", "Total USDC deployed across all open markets.")
 TRADING_HALTED = _make(
-    Gauge, "copybot_trading_halted",
+    Gauge,
+    "copybot_trading_halted",
     "1 if new entries are currently blocked (daily-loss limit or post-loss cooldown), else 0.",
 )
 CONSECUTIVE_LOSSES = _make(Gauge, "copybot_consecutive_losses", "Current consecutive-loss streak count.")
 COOLDOWN_SECONDS_REMAINING = _make(
-    Gauge, "copybot_cooldown_seconds_remaining", "Seconds remaining on the active post-loss cooldown (0 if none).",
+    Gauge,
+    "copybot_cooldown_seconds_remaining",
+    "Seconds remaining on the active post-loss cooldown (0 if none).",
 )
 TRACKED_TRADERS = _make(Gauge, "copybot_tracked_traders", "Number of traders currently tracked from the leaderboard.")
 LAST_TRACKER_REFRESH = _make(
-    Gauge, "copybot_last_tracker_refresh_timestamp", "Unix timestamp of the last successful tracker refresh().",
+    Gauge,
+    "copybot_last_tracker_refresh_timestamp",
+    "Unix timestamp of the last successful tracker refresh().",
 )
 TRADER_SCORE = _make(
-    Gauge, "copybot_trader_score", "Composite score of each tracked trader.", ("trader_address", "rank"),
+    Gauge,
+    "copybot_trader_score",
+    "Composite score of each tracked trader.",
+    ("trader_address", "rank"),
 )
 
 # ─── Counters (incremented inline at event call sites) ────────────────────────
 
 TRADE_EVENTS = _make(
-    Counter, "copybot_trade_events_total", "Trade events received from the monitor.", ("trade_type",),
+    Counter,
+    "copybot_trade_events_total",
+    "Trade events received from the monitor.",
+    ("trade_type",),
 )
 POSITIONS_OPENED = _make(
-    Counter, "copybot_positions_opened_total", "Copy positions successfully opened (order filled and persisted).",
+    Counter,
+    "copybot_positions_opened_total",
+    "Copy positions successfully opened (order filled and persisted).",
 )
 COPIES_SKIPPED = _make(
-    Counter, "copybot_copies_skipped_total", "Detected BUY events that did not result in a copy.", ("reason",),
+    Counter,
+    "copybot_copies_skipped_total",
+    "Detected BUY events that did not result in a copy.",
+    ("reason",),
 )
 EXITS = _make(Counter, "copybot_exits_total", "Position exits, labeled by ExitReason.", ("reason",))
 TRADERS_DEMOTED = _make(
-    Counter, "copybot_traders_demoted_total", "Traders demoted for failing the Wilson win-rate floor.",
+    Counter,
+    "copybot_traders_demoted_total",
+    "Traders demoted for failing the Wilson win-rate floor.",
 )
 EXPOSURE_RELEASED = _make(
-    Counter, "copybot_exposure_released_total", "Exposure rollbacks via release_exposure().", ("cause",),
+    Counter,
+    "copybot_exposure_released_total",
+    "Exposure rollbacks via release_exposure().",
+    ("cause",),
 )
 
 # ─── Histograms ───────────────────────────────────────────────────────────────
 
 EXIT_PNL = _make(
-    Histogram, "copybot_exit_pnl_usd", "Distribution of per-exit realized PnL in USDC.", ("reason",),
+    Histogram,
+    "copybot_exit_pnl_usd",
+    "Distribution of per-exit realized PnL in USDC.",
+    ("reason",),
 )
 
 
@@ -131,10 +157,7 @@ def start_metrics_server(port: int = 9090) -> bool:
     installed (metrics remain no-ops). Never raises on a missing dependency.
     """
     if not _PROM_AVAILABLE:
-        logger.warning(
-            "prometheus_client not installed. Metrics disabled. "
-            "Install with: pip install prometheus-client"
-        )
+        logger.warning("prometheus_client not installed. Metrics disabled. Install with: pip install prometheus-client")
         return False
     start_http_server(port)
     logger.info("Prometheus metrics server started on port %d", port)

@@ -48,30 +48,31 @@ import aiohttp
 
 logger = logging.getLogger(__name__)
 
-_EPSILON             = 1e-9
-POLYMARKET_DATA_API  = "https://data-api.polymarket.com"
+_EPSILON = 1e-9
+POLYMARKET_DATA_API = "https://data-api.polymarket.com"
 
 
 # ─── Config ───────────────────────────────────────────────────────────────────
 
+
 @dataclass
 class TrackerConfig:
     # Eligibility filters (applied before scoring)
-    min_total_pnl:       float = 10_000.0
-    min_win_rate:        float = 0.55
-    min_trade_count:     int   = 50
-    min_expectancy:      float = 0.01    # H16: min expected ROI (mean_pnl × log(n+1))
+    min_total_pnl: float = 10_000.0
+    min_win_rate: float = 0.55
+    min_trade_count: int = 50
+    min_expectancy: float = 0.01  # H16: min expected ROI (mean_pnl × log(n+1))
 
     # Scoring parameters
-    half_life_days:      float = 14.0    # Recency decay: score halves every N days
-    max_top_traders:     int   = 5       # Number of traders to return
-    sharpe_cap:          float = 3.0     # H14: cap Sharpe to prevent outlier amplification
-    sharpe_shrink_min_trades: int = 20   # H14: shrink Sharpe below this sample size
+    half_life_days: float = 14.0  # Recency decay: score halves every N days
+    max_top_traders: int = 5  # Number of traders to return
+    sharpe_cap: float = 3.0  # H14: cap Sharpe to prevent outlier amplification
+    sharpe_shrink_min_trades: int = 20  # H14: shrink Sharpe below this sample size
 
     # Data fetch limits
-    activity_fetch_limit: int  = 500     # Trades to pull per trader for stats
-    leaderboard_limit:   int   = 50      # Candidates to fetch from leaderboard
-    recent_window_days:  int   = 30      # H15: trailing window for dual-window filtering
+    activity_fetch_limit: int = 500  # Trades to pull per trader for stats
+    leaderboard_limit: int = 50  # Candidates to fetch from leaderboard
+    recent_window_days: int = 30  # H15: trailing window for dual-window filtering
 
     # Rebalance schedule
     rebalance_interval_days: float = 7.0
@@ -79,29 +80,32 @@ class TrackerConfig:
 
 # ─── Data Models ──────────────────────────────────────────────────────────────
 
+
 @dataclass
 class TradeRecord:
     """A single resolved trade used for return statistics."""
-    trade_id:    str
-    market_id:   str
-    pnl:         float   # ROI fraction (pnl_dollars / cost_basis); +0.10 = +10%
-    is_win:      bool
-    executed_at: float   # Unix timestamp
+
+    trade_id: str
+    market_id: str
+    pnl: float  # ROI fraction (pnl_dollars / cost_basis); +0.10 = +10%
+    is_win: bool
+    executed_at: float  # Unix timestamp
 
 
 @dataclass
 class TraderStats:
     """Full statistical profile of a trader derived from their activity."""
-    address:         str
-    pseudonym:       str
-    total_pnl:       float          # Leaderboard aggregate PnL, in DOLLARS
-    trade_count:     int
-    win_rate:        float
+
+    address: str
+    pseudonym: str
+    total_pnl: float  # Leaderboard aggregate PnL, in DOLLARS
+    trade_count: int
+    win_rate: float
     # Per round-trip RETURN ON CAPITAL (ROI fractions, not dollars). This keeps
     # the Sharpe proxy / mean / stddev size-independent. total_pnl above stays
     # in dollars for the min_total_pnl eligibility filter.
-    pnl_per_trade:   List[float]    = field(default_factory=list)
-    last_trade_time: float          = 0.0
+    pnl_per_trade: List[float] = field(default_factory=list)
+    last_trade_time: float = 0.0
 
     @property
     def mean_pnl(self) -> float:
@@ -132,12 +136,13 @@ class TraderStats:
 @dataclass
 class ScoredTrader:
     """A trader with their composite score and score component breakdown."""
-    stats:           TraderStats
-    score:           float
-    sharpe_proxy:    float
-    consistency:     float
-    recency_weight:  float
-    rank:            int = 0
+
+    stats: TraderStats
+    score: float
+    sharpe_proxy: float
+    consistency: float
+    recency_weight: float
+    rank: int = 0
 
     def __repr__(self) -> str:
         return (
@@ -149,6 +154,7 @@ class ScoredTrader:
 
 
 # ─── Scorer ───────────────────────────────────────────────────────────────────
+
 
 class TraderScorer:
     """
@@ -170,18 +176,18 @@ class TraderScorer:
         # H14: cap Sharpe to prevent outliers; shrink for small samples.
         sharpe = self._capped_sharpe(stats)
         consistency = stats.win_rate * math.log(stats.trade_count + 1)
-        recency     = self._recency_weight(stats.last_trade_time)
+        recency = self._recency_weight(stats.last_trade_time)
 
         # H14: weighted sum instead of multiplication to prevent single extreme
         # component from dominating. Weights: sharpe (40%) + consistency (35%) + recency (25%).
         score = (4.0 * sharpe + 3.5 * consistency + 2.5 * recency) / 10.0
 
         return ScoredTrader(
-            stats          = stats,
-            score          = score,
-            sharpe_proxy   = sharpe,
-            consistency    = consistency,
-            recency_weight = recency,
+            stats=stats,
+            score=score,
+            sharpe_proxy=sharpe,
+            consistency=consistency,
+            recency_weight=recency,
         )
 
     def score_many(self, all_stats: List[TraderStats]) -> List[ScoredTrader]:
@@ -217,14 +223,13 @@ class TraderScorer:
         if stats.win_rate < self.cfg.min_win_rate:
             logger.debug(
                 "Trader %s has low win_rate=%.2f%% (below %.2f%%) but passes expectancy check",
-                stats.address[:10], stats.win_rate * 100, self.cfg.min_win_rate * 100
+                stats.address[:10],
+                stats.win_rate * 100,
+                self.cfg.min_win_rate * 100,
             )
 
         if reasons:
-            logger.debug(
-                "Trader %s ineligible: %s",
-                stats.address[:10], "; ".join(reasons)
-            )
+            logger.debug("Trader %s ineligible: %s", stats.address[:10], "; ".join(reasons))
             return False
         return True
 
@@ -256,13 +261,14 @@ class TraderScorer:
             return 0.0
 
         days_inactive = (time.time() - last_trade_time) / 86_400.0
-        days_inactive = max(days_inactive, 0.0)   # Guard against clock skew
+        days_inactive = max(days_inactive, 0.0)  # Guard against clock skew
 
         lambda_decay = math.log(2) / self.cfg.half_life_days
         return math.exp(-lambda_decay * days_inactive)
 
 
 # ─── TrackerClient ────────────────────────────────────────────────────────────
+
 
 class TrackerClient:
     """
@@ -274,12 +280,12 @@ class TrackerClient:
 
     def __init__(
         self,
-        config:      Optional[TrackerConfig] = None,
-        data_api:    str                     = POLYMARKET_DATA_API,
+        config: Optional[TrackerConfig] = None,
+        data_api: str = POLYMARKET_DATA_API,
     ):
-        self.cfg         = config or TrackerConfig()
-        self._data_api   = data_api
-        self._scorer     = TraderScorer(self.cfg)
+        self.cfg = config or TrackerConfig()
+        self._data_api = data_api
+        self._scorer = TraderScorer(self.cfg)
         self.top_traders: List[ScoredTrader] = []
         self._last_refresh: float = 0.0
 
@@ -308,34 +314,28 @@ class TrackerClient:
                 return []
 
             logger.info(
-                "Fetching activity for %d candidates in both windows "
-                "(all_count=%d, recent_count=%d).",
-                len(candidates), len(all_window), len(recent_window)
+                "Fetching activity for %d candidates in both windows (all_count=%d, recent_count=%d).",
+                len(candidates),
+                len(all_window),
+                len(recent_window),
             )
 
-            stats_tasks = [
-                self._build_trader_stats(session, entry)
-                for entry in candidates
-            ]
+            stats_tasks = [self._build_trader_stats(session, entry) for entry in candidates]
             all_stats_raw = await asyncio.gather(*stats_tasks, return_exceptions=True)
 
             all_stats: List[TraderStats] = []
             for entry, result in zip(candidates, all_stats_raw, strict=True):
                 if isinstance(result, Exception):
-                    logger.warning(
-                        "Stats fetch failed for %s: %s",
-                        entry.get("address", "?")[:10], result
-                    )
+                    logger.warning("Stats fetch failed for %s: %s", entry.get("address", "?")[:10], result)
                 elif isinstance(result, TraderStats):
                     all_stats.append(result)
 
-            self.top_traders   = self._scorer.score_many(all_stats)
+            self.top_traders = self._scorer.score_many(all_stats)
             self._last_refresh = time.time()
 
             for t in self.top_traders:
                 logger.info(
-                    "Rank #%d | %s | score=%.4f | expectancy=%.4f | "
-                    "trades=%d | sharpe=%.3f | recency=%.3f",
+                    "Rank #%d | %s | score=%.4f | expectancy=%.4f | trades=%d | sharpe=%.3f | recency=%.3f",
                     t.rank,
                     t.stats.pseudonym or t.stats.address[:12],
                     t.score,
@@ -363,9 +363,7 @@ class TrackerClient:
 
     # ── Private: API Fetchers ─────────────────────────────────────────────────
 
-    async def _fetch_dual_leaderboards(
-        self, session: aiohttp.ClientSession
-    ) -> Tuple[List[dict], List[dict]]:
+    async def _fetch_dual_leaderboards(self, session: aiohttp.ClientSession) -> Tuple[List[dict], List[dict]]:
         """
         H15: Fetch both all-time and recent (30d) leaderboards to filter for
         dual-window consistency. Returns (all_window, recent_window).
@@ -376,11 +374,9 @@ class TrackerClient:
         recent_lb = await self._fetch_leaderboard_window(session, recent_window)
         return all_lb, recent_lb
 
-    async def _fetch_leaderboard_window(
-        self, session: aiohttp.ClientSession, window: str
-    ) -> List[dict]:
+    async def _fetch_leaderboard_window(self, session: aiohttp.ClientSession, window: str) -> List[dict]:
         """Fetch leaderboard for a specific time window (e.g., 'all', '30d')."""
-        url    = f"{self._data_api}/leaderboard"
+        url = f"{self._data_api}/leaderboard"
         params: Dict[str, Any] = {"window": window, "limit": self.cfg.leaderboard_limit}
 
         try:
@@ -390,10 +386,7 @@ class TrackerClient:
                     return []
                 data = await resp.json()
                 # Pre-filter by minimum PnL before paying for per-trader API calls
-                return [
-                    entry for entry in data
-                    if float(entry.get("pnl", 0)) >= self.cfg.min_total_pnl
-                ]
+                return [entry for entry in data if float(entry.get("pnl", 0)) >= self.cfg.min_total_pnl]
         except Exception as exc:
             logger.warning("Leaderboard fetch (window=%s) failed: %s", window, exc)
             return []
@@ -407,7 +400,7 @@ class TrackerClient:
         Fetch a trader's recent activity and compute TraderStats.
         Combines leaderboard aggregate data with per-trade detail from /activity.
         """
-        address   = leaderboard_entry.get("name", "")      # "name" = wallet address
+        address = leaderboard_entry.get("name", "")  # "name" = wallet address
         pseudonym = leaderboard_entry.get("pseudonym", "")
         total_pnl = float(leaderboard_entry.get("pnl", 0))
 
@@ -419,13 +412,13 @@ class TrackerClient:
         if not trades:
             trade_count = int(leaderboard_entry.get("tradesCount", 0))
             return TraderStats(
-                address         = address,
-                pseudonym       = pseudonym,
-                total_pnl       = total_pnl,
-                trade_count     = trade_count,
-                win_rate        = 0.0,
-                pnl_per_trade   = [],
-                last_trade_time = 0.0,
+                address=address,
+                pseudonym=pseudonym,
+                total_pnl=total_pnl,
+                trade_count=trade_count,
+                win_rate=0.0,
+                pnl_per_trade=[],
+                last_trade_time=0.0,
             )
 
         return _compute_trader_stats(address, pseudonym, total_pnl, trades)
@@ -439,16 +432,13 @@ class TrackerClient:
         Fetch recent trade activity for a wallet.
         API: GET /activity?user={address}&limit=N
         """
-        url    = f"{self._data_api}/activity"
+        url = f"{self._data_api}/activity"
         params: Dict[str, Any] = {"user": address, "limit": self.cfg.activity_fetch_limit}
 
         try:
             async with session.get(url, params=params) as resp:
                 if resp.status != 200:
-                    logger.warning(
-                        "Activity fetch for %s returned HTTP %d",
-                        address[:10], resp.status
-                    )
+                    logger.warning("Activity fetch for %s returned HTTP %d", address[:10], resp.status)
                     return []
                 return await resp.json()
         except Exception as exc:
@@ -458,11 +448,12 @@ class TrackerClient:
 
 # ─── Stats Computation ────────────────────────────────────────────────────────
 
+
 def _compute_trader_stats(
-    address:   str,
+    address: str,
     pseudonym: str,
     total_pnl: float,
-    activity:  List[dict],
+    activity: List[dict],
 ) -> TraderStats:
     """
     Derive TraderStats from raw activity records.
@@ -513,17 +504,17 @@ def _compute_trader_stats(
             continue
 
         market_id = str(item.get("market", item.get("conditionId", "")))
-        token_id  = str(item.get("asset",  item.get("tokenId",    "")))
-        side      = str(item.get("side",   "")).upper()
+        token_id = str(item.get("asset", item.get("tokenId", "")))
+        side = str(item.get("side", "")).upper()
 
         try:
             price = float(item.get("price", 0))
-            size  = float(item.get("size",  item.get("usdcSize", 0)))
+            size = float(item.get("size", item.get("usdcSize", 0)))
         except (ValueError, TypeError):
             continue
 
         ts_raw = item.get("timestamp", item.get("createdAt", 0))
-        ts     = _parse_timestamp(ts_raw)
+        ts = _parse_timestamp(ts_raw)
         last_trade_ts = max(last_trade_ts, ts)
 
         key = (market_id, token_id)
@@ -545,13 +536,15 @@ def _compute_trader_stats(
                     # Zero-cost basis makes ROI undefined; skip it.
                     continue
                 roi = pnl_dollars / cost_basis
-                trade_records.append(TradeRecord(
-                    trade_id    = str(item.get("id", "")),
-                    market_id   = market_id,
-                    pnl         = roi,                # ROI fraction
-                    is_win      = pnl_dollars > 0,
-                    executed_at = ts,
-                ))
+                trade_records.append(
+                    TradeRecord(
+                        trade_id=str(item.get("id", "")),
+                        market_id=market_id,
+                        pnl=roi,  # ROI fraction
+                        is_win=pnl_dollars > 0,
+                        executed_at=ts,
+                    )
+                )
 
         elif side == "BUY":
             if key not in open_buys:
@@ -569,37 +562,39 @@ def _compute_trader_stats(
                 # Zero-cost basis (price ~0) makes ROI undefined; skip it.
                 continue
             roi = pnl_dollars / cost_basis
-            trade_records.append(TradeRecord(
-                trade_id    = str(item.get("id", "")),
-                market_id   = market_id,
-                pnl         = roi,            # ROI fraction, e.g. 0.10 = +10%
-                is_win      = pnl_dollars > 0,
-                executed_at = ts,
-            ))
+            trade_records.append(
+                TradeRecord(
+                    trade_id=str(item.get("id", "")),
+                    market_id=market_id,
+                    pnl=roi,  # ROI fraction, e.g. 0.10 = +10%
+                    is_win=pnl_dollars > 0,
+                    executed_at=ts,
+                )
+            )
 
     if not trade_records:
         return TraderStats(
-            address         = address,
-            pseudonym       = pseudonym,
-            total_pnl       = total_pnl,
-            trade_count     = len(activity),
-            win_rate        = 0.0,
-            pnl_per_trade   = [],
-            last_trade_time = last_trade_ts,
+            address=address,
+            pseudonym=pseudonym,
+            total_pnl=total_pnl,
+            trade_count=len(activity),
+            win_rate=0.0,
+            pnl_per_trade=[],
+            last_trade_time=last_trade_ts,
         )
 
-    wins          = sum(1 for t in trade_records if t.is_win)
-    win_rate      = wins / len(trade_records)
+    wins = sum(1 for t in trade_records if t.is_win)
+    win_rate = wins / len(trade_records)
     pnl_per_trade = [t.pnl for t in trade_records]
 
     return TraderStats(
-        address         = address,
-        pseudonym       = pseudonym,
-        total_pnl       = total_pnl,
-        trade_count     = len(trade_records),
-        win_rate        = win_rate,
-        pnl_per_trade   = pnl_per_trade,
-        last_trade_time = last_trade_ts,
+        address=address,
+        pseudonym=pseudonym,
+        total_pnl=total_pnl,
+        trade_count=len(trade_records),
+        win_rate=win_rate,
+        pnl_per_trade=pnl_per_trade,
+        last_trade_time=last_trade_ts,
     )
 
 
@@ -613,6 +608,7 @@ def _parse_timestamp(raw) -> float:
     if isinstance(raw, str):
         try:
             from datetime import datetime
+
             return datetime.fromisoformat(raw.replace("Z", "+00:00")).timestamp()
         except ValueError:
             return time.time()

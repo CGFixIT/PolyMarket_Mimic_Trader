@@ -32,10 +32,15 @@ async def portfolio(tmp_path):
 @pytest.fixture
 def gamma():
     g = AsyncMock()
-    g.get_market = AsyncMock(return_value=Market(
-        condition_id="mkt-a", question="Q?", volume_24h=50_000, active=True,
-        resolve_time=None,
-    ))
+    g.get_market = AsyncMock(
+        return_value=Market(
+            condition_id="mkt-a",
+            question="Q?",
+            volume_24h=50_000,
+            active=True,
+            resolve_time=None,
+        )
+    )
     g.get_market_price = AsyncMock(return_value=0.50)
     return g
 
@@ -49,9 +54,16 @@ def copier(config, portfolio, gamma):
 
 def buy_event(price=0.50, size=100.0, market="mkt-a", token="tok-a", wallet="0xwhale") -> TradeEvent:
     return TradeEvent(
-        event_id="e1", wallet_address=wallet, market_id=market, token_id=token,
-        outcome_label="Yes", trade_type=TradeType.BUY, price=price,
-        size_usdc=size, timestamp=time.time(), transaction_hash="0xhash",
+        event_id="e1",
+        wallet_address=wallet,
+        market_id=market,
+        token_id=token,
+        outcome_label="Yes",
+        trade_type=TradeType.BUY,
+        price=price,
+        size_usdc=size,
+        timestamp=time.time(),
+        transaction_hash="0xhash",
     )
 
 
@@ -93,19 +105,30 @@ class TestHandleTradeEvent:
 
     @pytest.mark.asyncio
     async def test_low_volume_skip(self, copier, gamma):
-        gamma.get_market = AsyncMock(return_value=Market(
-            condition_id="mkt-a", volume_24h=100, active=True, resolve_time=None,
-        ))
+        gamma.get_market = AsyncMock(
+            return_value=Market(
+                condition_id="mkt-a",
+                volume_24h=100,
+                active=True,
+                resolve_time=None,
+            )
+        )
         await copier.handle_trade_event(buy_event())
         assert await copier.portfolio.position_count() == 0
 
     @pytest.mark.asyncio
     async def test_resolution_blackout_skip(self, copier, gamma):
         from datetime import datetime, timezone, timedelta
+
         soon = datetime.now(timezone.utc) + timedelta(hours=6)
-        gamma.get_market = AsyncMock(return_value=Market(
-            condition_id="mkt-a", volume_24h=50_000, active=True, resolve_time=soon,
-        ))
+        gamma.get_market = AsyncMock(
+            return_value=Market(
+                condition_id="mkt-a",
+                volume_24h=50_000,
+                active=True,
+                resolve_time=soon,
+            )
+        )
         await copier.handle_trade_event(buy_event())
         assert await copier.portfolio.position_count() == 0
 
@@ -166,9 +189,8 @@ class TestOrderFailureExposureRelease:
     @pytest.mark.asyncio
     async def test_insufficient_liquidity_releases_exposure(self, copier):
         from polymarket_copier.api.clob_client import InsufficientLiquidityError
-        copier.clob.place_order = AsyncMock(
-            side_effect=InsufficientLiquidityError("thin book")
-        )
+
+        copier.clob.place_order = AsyncMock(side_effect=InsufficientLiquidityError("thin book"))
         await copier.handle_trade_event(buy_event(market="mkt-y", token="tok-y"))
         assert await copier.portfolio.position_count() == 0
         assert copier.risk.market_exposure("mkt-y") == pytest.approx(0.0)
@@ -255,6 +277,7 @@ class TestOrderTypeSelection:
     @pytest.mark.asyncio
     async def test_exit_places_fak_order(self, copier):
         from polymarket_copier.core.monitor import PriceTick
+
         await copier.handle_trade_event(buy_event(price=0.50, token="tok-a"))
         captured = []
         orig = copier.clob.place_order
@@ -291,6 +314,7 @@ class TestHandlePriceTick:
     @pytest.mark.asyncio
     async def test_take_profit_exit(self, copier):
         from polymarket_copier.core.monitor import PriceTick
+
         await copier.handle_trade_event(buy_event(price=0.50, token="tok-a"))
         assert await copier.portfolio.position_count() == 1
         # Price jumps to TP (0.70 for entry 0.50) → position closes
@@ -300,6 +324,7 @@ class TestHandlePriceTick:
     @pytest.mark.asyncio
     async def test_hold_no_exit(self, copier):
         from polymarket_copier.core.monitor import PriceTick
+
         await copier.handle_trade_event(buy_event(price=0.50, token="tok-a"))
         await copier.handle_price_tick(PriceTick(token_id="tok-a", price=0.55))
         assert await copier.portfolio.position_count() == 1
@@ -307,6 +332,7 @@ class TestHandlePriceTick:
     @pytest.mark.asyncio
     async def test_unknown_token_ignored(self, copier):
         from polymarket_copier.core.monitor import PriceTick
+
         # No position for this token → no error
         await copier.handle_price_tick(PriceTick(token_id="ghost", price=0.55))
         assert await copier.portfolio.position_count() == 0
@@ -314,13 +340,10 @@ class TestHandlePriceTick:
     @pytest.mark.asyncio
     async def test_multiple_positions_same_token_both_exit(self, copier):
         from polymarket_copier.core.monitor import PriceTick
+
         # Two tracked traders both buy the SAME token → two separate positions.
-        await copier.handle_trade_event(
-            buy_event(price=0.50, token="tok-a", wallet="0xwhale")
-        )
-        await copier.handle_trade_event(
-            buy_event(price=0.50, token="tok-a", wallet="0xother")
-        )
+        await copier.handle_trade_event(buy_event(price=0.50, token="tok-a", wallet="0xwhale"))
+        await copier.handle_trade_event(buy_event(price=0.50, token="tok-a", wallet="0xother"))
         assert await copier.portfolio.position_count() == 2
 
         # A single tick that crosses both stops (SL=0.375 for entry 0.50) must
@@ -359,6 +382,7 @@ class TestTradingHaltOnEntry:
     async def test_entry_blocked_when_halted(self, copier):
         # Daily-loss breaker can no longer be bypassed by opening a new position.
         from unittest.mock import MagicMock
+
         copier.risk.is_trading_halted = MagicMock(return_value="daily loss limit")
         await copier.handle_trade_event(buy_event())
         assert await copier.portfolio.position_count() == 0
@@ -390,7 +414,7 @@ class TestPerTraderAllocationOnCopy:
     @pytest.mark.asyncio
     async def test_trader_cap_blocks_excess_copies(self, copier):
         # Cap a trader at a tiny allocation; a normal copy should breach it.
-        copier.risk.cfg.max_trader_allocation = 0.001   # $10 on $10k bankroll
+        copier.risk.cfg.max_trader_allocation = 0.001  # $10 on $10k bankroll
         # Copy size = min(0.5*100, 0.02*10000)= $50 > $10 cap → blocked.
         await copier.handle_trade_event(buy_event(size=100.0))
         assert await copier.portfolio.position_count() == 0
@@ -399,6 +423,7 @@ class TestPerTraderAllocationOnCopy:
 
 
 # ─── Kelly position sizing (opt-in) ───────────────────────────────────────────
+
 
 async def _seed_closed_trades(portfolio, trader: str, wins: int, losses: int) -> None:
     """Insert N closed winning/losing positions for a trader directly into the DB."""
@@ -472,11 +497,18 @@ class TestKellySizing:
 
 # ─── Source exit mirroring ────────────────────────────────────────────────────
 
+
 def sell_event(token="tok-a", wallet="0xwhale") -> TradeEvent:
     return TradeEvent(
-        event_id="sell-1", wallet_address=wallet, market_id="mkt-a",
-        token_id=token, outcome_label="Yes", trade_type=TradeType.SELL,
-        price=0.65, size_usdc=100.0, timestamp=time.time(),
+        event_id="sell-1",
+        wallet_address=wallet,
+        market_id="mkt-a",
+        token_id=token,
+        outcome_label="Yes",
+        trade_type=TradeType.SELL,
+        price=0.65,
+        size_usdc=100.0,
+        timestamp=time.time(),
         transaction_hash="0xsell",
     )
 
@@ -536,6 +568,7 @@ class TestSourceExitMirroring:
 
 # ─── Paper fill price propagated to position entry ────────────────────────────
 
+
 class TestPaperFillPriceInPosition:
     @pytest.mark.asyncio
     async def test_position_entry_price_reflects_fill_slippage(self, copier):
@@ -559,6 +592,7 @@ class TestPaperFillPriceInPosition:
 
 # ─── Live fill reconciliation ─────────────────────────────────────────────────
 
+
 class TestFillReconciliation:
     """After place_order, the opened position and reserved exposure must reflect
     the ACTUAL fill, not an assumed full fill. Paper = full fill (no-op)."""
@@ -579,9 +613,13 @@ class TestFillReconciliation:
         """A 50% fill → position size halved and half the registered exposure freed."""
         # Copy size = min(0.5*100, 0.02*10000) = $50 → 100 shares @ 0.50.
         # Registered notional = 0.50 * 100 = $50.
-        copier.clob.place_order = AsyncMock(return_value={
-            "status": "LIVE", "filled_size": 50.0, "avg_price": 0.50,
-        })
+        copier.clob.place_order = AsyncMock(
+            return_value={
+                "status": "LIVE",
+                "filled_size": 50.0,
+                "avg_price": 0.50,
+            }
+        )
         await copier.handle_trade_event(buy_event(price=0.50, size=100.0, market="mkt-p"))
         positions = await copier.portfolio.get_open_positions()
         assert len(positions) == 1
@@ -594,10 +632,15 @@ class TestFillReconciliation:
     async def test_zero_fill_releases_all_exposure_and_opens_no_position(self, copier):
         """A no-fill order opens NO position, subscribes NO token, frees all exposure."""
         from unittest.mock import MagicMock
+
         copier.monitor = MagicMock()
-        copier.clob.place_order = AsyncMock(return_value={
-            "status": "LIVE", "filled_size": 0.0, "avg_price": 0.50,
-        })
+        copier.clob.place_order = AsyncMock(
+            return_value={
+                "status": "LIVE",
+                "filled_size": 0.0,
+                "avg_price": 0.50,
+            }
+        )
         before = await copier.portfolio.position_count()
         await copier.handle_trade_event(buy_event(price=0.50, size=100.0, market="mkt-0"))
         assert await copier.portfolio.position_count() == before
@@ -610,15 +653,20 @@ class TestFillReconciliation:
     @pytest.mark.asyncio
     async def test_matched_amount_field_used_as_fill_size_fallback(self, copier):
         """When filled_size is absent, matched_amount supplies the filled shares."""
-        copier.clob.place_order = AsyncMock(return_value={
-            "status": "LIVE", "matched_amount": 75.0, "price": 0.50,
-        })
+        copier.clob.place_order = AsyncMock(
+            return_value={
+                "status": "LIVE",
+                "matched_amount": 75.0,
+                "price": 0.50,
+            }
+        )
         await copier.handle_trade_event(buy_event(price=0.50, size=100.0, market="mkt-m"))
         positions = await copier.portfolio.get_open_positions()
         assert positions[0].size_shares == pytest.approx(75.0)
 
 
 # ─── Kelly tracker-prior seeding ─────────────────────────────────────────────
+
 
 class TestKellyTrackerPrior:
     """H18: Kelly sizing uses the tracker's DEMONSTRATED edge (from mean per-trade
@@ -757,10 +805,12 @@ class TestKellyTrackerPrior:
 
 # ─── Latency logging ─────────────────────────────────────────────────────────
 
+
 class TestLatencyLogging:
     @pytest.mark.asyncio
     async def test_age_at_detection_logged_for_buy(self, copier, caplog):
         import logging
+
         with caplog.at_level(logging.INFO, logger="polymarket_copier"):
             await copier.handle_trade_event(buy_event())
         age_logged = any("age=" in r.message for r in caplog.records)
@@ -769,6 +819,7 @@ class TestLatencyLogging:
     @pytest.mark.asyncio
     async def test_decision_latency_logged_after_successful_copy(self, copier, caplog):
         import logging
+
         with caplog.at_level(logging.INFO, logger="polymarket_copier"):
             await copier.handle_trade_event(buy_event())
         latency_logged = any("decision_latency" in r.message for r in caplog.records)
@@ -776,6 +827,7 @@ class TestLatencyLogging:
 
 
 # ─── Entry-path TOCTOU lock ───────────────────────────────────────────────────
+
 
 class TestEntryTocTouLock:
     """Concurrent wallet polls must not both pass the position-count gate and
@@ -786,6 +838,7 @@ class TestEntryTocTouLock:
         """Two simultaneous handle_trade_event calls for different markets must
         not both open when max_concurrent_positions == 1."""
         import asyncio
+
         copier.config.copy_trading.max_concurrent_positions = 1
 
         event_a = buy_event(market="mkt-a", token="tok-a", wallet="0xwhale")
@@ -822,6 +875,7 @@ class TestStructuredEvents:
         tests, so the logger's effective level would otherwise be WARNING). Returns
         (records, cleanup) where cleanup() detaches the handler and restores level."""
         import logging
+
         records = []
 
         class _Cap(logging.Handler):
@@ -860,9 +914,14 @@ class TestStructuredEvents:
     @pytest.mark.asyncio
     async def test_copy_skipped_event_carries_reason(self, copier, gamma):
         # Force a low-volume skip and assert the structured copy_skipped event fires.
-        gamma.get_market = AsyncMock(return_value=Market(
-            condition_id="mkt-a", volume_24h=100, active=True, resolve_time=None,
-        ))
+        gamma.get_market = AsyncMock(
+            return_value=Market(
+                condition_id="mkt-a",
+                volume_24h=100,
+                active=True,
+                resolve_time=None,
+            )
+        )
         records, cleanup = self._capture_events()
         try:
             await copier.handle_trade_event(buy_event())
@@ -875,6 +934,7 @@ class TestStructuredEvents:
     @pytest.mark.asyncio
     async def test_position_closed_event_emitted_on_exit(self, copier):
         from polymarket_copier.core.monitor import PriceTick
+
         await copier.handle_trade_event(buy_event(price=0.50, token="tok-a"))
         records, cleanup = self._capture_events()
         try:
@@ -891,9 +951,8 @@ class TestStructuredEvents:
     async def test_circuit_breaker_event_emitted_when_halted(self, copier):
         # Drive daily PnL below the loss limit so the entry path halts.
         from decimal import Decimal
-        copier.risk._daily_pnl = Decimal(
-            str(-(copier.risk.bankroll * copier.risk.cfg.daily_loss_limit_pct) - 1.0)
-        )
+
+        copier.risk._daily_pnl = Decimal(str(-(copier.risk.bankroll * copier.risk.cfg.daily_loss_limit_pct) - 1.0))
         records, cleanup = self._capture_events()
         try:
             await copier.handle_trade_event(buy_event())
@@ -916,6 +975,7 @@ class TestSkipReasons:
     @staticmethod
     def _capture():
         import logging
+
         records = []
 
         class _Cap(logging.Handler):

@@ -37,6 +37,7 @@ from polymarket_copier.models.types import Market
 
 # ─── Fake aiohttp session for the monitor's REST poll path ────────────────────
 
+
 class _FakeResp:
     def __init__(self, data, status=200):
         self._data = data
@@ -64,6 +65,7 @@ class _FakeSession:
 
 # ─── Fixtures ─────────────────────────────────────────────────────────────────
 
+
 @pytest.fixture
 def config() -> AppConfig:
     cfg = AppConfig(mode="paper", bankroll=10_000)
@@ -85,10 +87,15 @@ async def portfolio(tmp_path):
 @pytest.fixture
 def gamma():
     g = AsyncMock()
-    g.get_market = AsyncMock(return_value=Market(
-        condition_id="mkt-a", question="Q?", volume_24h=50_000, active=True,
-        resolve_time=None,
-    ))
+    g.get_market = AsyncMock(
+        return_value=Market(
+            condition_id="mkt-a",
+            question="Q?",
+            volume_24h=50_000,
+            active=True,
+            resolve_time=None,
+        )
+    )
     g.get_market_price = AsyncMock(return_value=0.50)
     return g
 
@@ -101,22 +108,30 @@ def wired(config, portfolio, gamma):
     copier = CopyTrader(risk, portfolio, clob, gamma, config)
     monitor = TradeMonitor(
         tracked_wallets=["0xWHALE"],
-        on_trade=copier.handle_trade_event,   # async def
-        on_price=copier.handle_price_tick,     # async def
-        prime_on_start=False,   # act on the first poll (cold-start guard tested separately)
+        on_trade=copier.handle_trade_event,  # async def
+        on_price=copier.handle_price_tick,  # async def
+        prime_on_start=False,  # act on the first poll (cold-start guard tested separately)
     )
     copier.monitor = monitor
     return monitor, copier
 
 
-BUY_ACTIVITY = [{
-    "id": "trade-1", "type": "trade", "side": "BUY",
-    "market": "mkt-a", "asset": "tok-a",
-    "price": "0.50", "size": "100", "timestamp": 1_700_000_000,
-}]
+BUY_ACTIVITY = [
+    {
+        "id": "trade-1",
+        "type": "trade",
+        "side": "BUY",
+        "market": "mkt-a",
+        "asset": "tok-a",
+        "price": "0.50",
+        "size": "100",
+        "timestamp": 1_700_000_000,
+    }
+]
 
 
 # ─── Tests ────────────────────────────────────────────────────────────────────
+
 
 class TestMonitorToCopier:
     @pytest.mark.asyncio
@@ -154,9 +169,7 @@ class TestMonitorToCopier:
         assert await copier.portfolio.position_count() == 1
 
         # Entry 0.50 -> TP 0.70. A tick at 0.72 should close the position.
-        raw = json.dumps([
-            {"event_type": "price_change", "asset_id": "tok-a", "price": "0.72"}
-        ])
+        raw = json.dumps([{"event_type": "price_change", "asset_id": "tok-a", "price": "0.72"}])
         await monitor._handle_ws_message(raw)
 
         assert await copier.portfolio.position_count() == 0, (
@@ -169,9 +182,7 @@ class TestMonitorToCopier:
         session = _FakeSession(BUY_ACTIVITY)
         await monitor._poll_wallet(session, "0xwhale")
 
-        raw = json.dumps([
-            {"event_type": "price_change", "asset_id": "tok-a", "price": "0.55"}
-        ])
+        raw = json.dumps([{"event_type": "price_change", "asset_id": "tok-a", "price": "0.55"}])
         await monitor._handle_ws_message(raw)
 
         assert await copier.portfolio.position_count() == 1
@@ -185,9 +196,7 @@ class TestMonitorToCopier:
         await monitor._poll_wallet(session, "0xwhale")
 
         # 0.68 is a new high but below TP (0.70) — should persist peak, not exit.
-        raw = json.dumps([
-            {"event_type": "price_change", "asset_id": "tok-a", "price": "0.68"}
-        ])
+        raw = json.dumps([{"event_type": "price_change", "asset_id": "tok-a", "price": "0.68"}])
         await monitor._handle_ws_message(raw)
 
         pos = await copier.portfolio.get_position_by_token("tok-a")
@@ -198,6 +207,7 @@ class TestMonitorToCopier:
 
 
 # ─── L4: WS Death + Recovery ──────────────────────────────────────────────────
+
 
 class TestWSDeathAndRecovery:
     """L4: Verify WebSocket health flag transitions, backoff cap, and heartbeat contract."""
@@ -237,10 +247,12 @@ class TestWSDeathAndRecovery:
         mock_cm.__aenter__ = AsyncMock(return_value=mock_session)
         mock_cm.__aexit__ = AsyncMock(return_value=False)
 
-        with patch.object(monitor, "_poll_all_wallets", side_effect=_stop_after_one), \
-             patch("polymarket_copier.core.monitor.aiohttp.ClientSession", return_value=mock_cm), \
-             patch("polymarket_copier.core.monitor.aiohttp.TCPConnector", return_value=MagicMock()), \
-             patch("polymarket_copier.core.monitor.aiohttp.ClientTimeout", return_value=MagicMock()):
+        with (
+            patch.object(monitor, "_poll_all_wallets", side_effect=_stop_after_one),
+            patch("polymarket_copier.core.monitor.aiohttp.ClientSession", return_value=mock_cm),
+            patch("polymarket_copier.core.monitor.aiohttp.TCPConnector", return_value=MagicMock()),
+            patch("polymarket_copier.core.monitor.aiohttp.ClientTimeout", return_value=MagicMock()),
+        ):
             try:
                 await asyncio.wait_for(monitor._poll_loop(), timeout=2.0)
             except asyncio.TimeoutError:
@@ -266,8 +278,8 @@ class TestWSDeathAndRecovery:
             assert delay <= max_backoff, f"retry={retry}: delay {delay} exceeds cap {max_backoff}"
 
         # After 4+ retries the exponential (5*2^3=40) would exceed the cap without the clamp.
-        assert min(base * (2 ** 3), max_backoff) == max_backoff  # 40 → 30 (capped)
-        assert min(base * (2 ** 10), max_backoff) == max_backoff  # 5120 → 30 (capped)
+        assert min(base * (2**3), max_backoff) == max_backoff  # 40 → 30 (capped)
+        assert min(base * (2**10), max_backoff) == max_backoff  # 5120 → 30 (capped)
 
     async def test_ws_loop_marks_unhealthy_and_retries_on_failure(self):
         """A _ws_loop iteration that fails sets ws_healthy=False and increments the
@@ -292,8 +304,10 @@ class TestWSDeathAndRecovery:
                 monitor._stop_event.set()
             raise OSError("connection refused")
 
-        with patch.object(monitor, "_ws_connect_and_listen", side_effect=_failing_connect), \
-             patch("polymarket_copier.core.monitor.asyncio.sleep", new_callable=AsyncMock):
+        with (
+            patch.object(monitor, "_ws_connect_and_listen", side_effect=_failing_connect),
+            patch("polymarket_copier.core.monitor.asyncio.sleep", new_callable=AsyncMock),
+        ):
             try:
                 await asyncio.wait_for(monitor._ws_loop(), timeout=2.0)
             except asyncio.TimeoutError:
@@ -345,12 +359,11 @@ class TestWSDeathAndRecovery:
         # New monitor starts unhealthy — exit_check_loop should use fast cadence.
         interval_when_down = fast_interval if not monitor.ws_healthy else normal_interval
         assert interval_when_down == fast_interval
-        assert fast_interval < normal_interval, (
-            "exit_poll_fast_seconds must be less than polling_interval_seconds"
-        )
+        assert fast_interval < normal_interval, "exit_poll_fast_seconds must be less than polling_interval_seconds"
 
 
 # ─── L7: Simultaneous Multi-Market Exits ──────────────────────────────────────
+
 
 class TestSimultaneousMultiMarketExits:
     """L7: Verify that concurrent position exits are race-free and exposure is fully released."""
@@ -419,9 +432,7 @@ class TestSimultaneousMultiMarketExits:
         assert await copier.portfolio.position_count() == 1
 
         # TP = 0.50 + (1-0.50)*0.40 = 0.70. Price 0.80 is above TP.
-        tp_tick = json.dumps([
-            {"event_type": "price_change", "asset_id": "tok-a", "price": "0.80"}
-        ])
+        tp_tick = json.dumps([{"event_type": "price_change", "asset_id": "tok-a", "price": "0.80"}])
 
         # Fire two concurrent WS ticks at the same above-TP price.
         await asyncio.gather(
@@ -430,9 +441,7 @@ class TestSimultaneousMultiMarketExits:
         )
 
         # Position must be closed (count=0) with no double-exit errors.
-        assert await copier.portfolio.position_count() == 0, (
-            "Position was not closed despite concurrent TP ticks."
-        )
+        assert await copier.portfolio.position_count() == 0, "Position was not closed despite concurrent TP ticks."
 
     async def test_concurrent_exits_leave_no_orphaned_exposure(self, wired):
         """After a concurrent double-tick exit, exposure must be 0 (no phantom allocation)."""
@@ -440,9 +449,7 @@ class TestSimultaneousMultiMarketExits:
         session = _FakeSession(BUY_ACTIVITY)
         await monitor._poll_wallet(session, "0xwhale")
 
-        tp_tick = json.dumps([
-            {"event_type": "price_change", "asset_id": "tok-a", "price": "0.80"}
-        ])
+        tp_tick = json.dumps([{"event_type": "price_change", "asset_id": "tok-a", "price": "0.80"}])
         await asyncio.gather(
             monitor._handle_ws_message(tp_tick),
             monitor._handle_ws_message(tp_tick),

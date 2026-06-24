@@ -45,9 +45,7 @@ def _reset_counter():
 @pytest.mark.asyncio
 async def test_concurrent_get_session_creates_single_session(client_factory):
     client = client_factory()
-    with patch("aiohttp.ClientSession", _FakeClientSession), patch(
-        "aiohttp.TCPConnector", _FakeConnector
-    ):
+    with patch("aiohttp.ClientSession", _FakeClientSession), patch("aiohttp.TCPConnector", _FakeConnector):
         sessions = await asyncio.gather(*[client._get_session() for _ in range(25)])
 
     # Exactly one session built, and every caller got that same object.
@@ -58,9 +56,7 @@ async def test_concurrent_get_session_creates_single_session(client_factory):
 @pytest.mark.asyncio
 async def test_get_session_reuses_open_session():
     client = GammaClient()
-    with patch("aiohttp.ClientSession", _FakeClientSession), patch(
-        "aiohttp.TCPConnector", _FakeConnector
-    ):
+    with patch("aiohttp.ClientSession", _FakeClientSession), patch("aiohttp.TCPConnector", _FakeConnector):
         first = await client._get_session()
         second = await client._get_session()
     assert first is second
