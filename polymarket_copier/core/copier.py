@@ -611,8 +611,11 @@ class CopyTrader:
             return_exceptions=True,
         )
 
-        for pos, price in zip(positions, prices):
-            if isinstance(price, Exception) or price is None:
+        for pos, price in zip(positions, prices, strict=True):
+            # gather(return_exceptions=True) yields BaseException on failure; skip
+            # those and any None (price unavailable). The isinstance check narrows
+            # the type so `price` is a plain float below.
+            if isinstance(price, BaseException) or price is None:
                 continue
             reason = self.risk.evaluate(pos, price)
             if reason != ExitReason.HOLD:
