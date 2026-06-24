@@ -27,6 +27,10 @@ class TestAppConfig:
         assert config.hot_poll_interval_seconds == 2.0
         assert config.hot_poll_window_seconds == 30.0
         assert config.tick_queue_maxsize == 1000
+        # M4: conviction signal — opt-in, bounded tilt.
+        assert config.copy_trading.conviction_sizing_enabled is False
+        assert config.copy_trading.max_conviction_mult == 2.0
+        assert config.copy_trading.min_conviction_mult == 0.5
 
     def test_custom_values(self):
         config = AppConfig(

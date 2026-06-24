@@ -52,6 +52,10 @@ class CopyTrader:
         # H18: tracker mean per-trade ROI per wallet — the demonstrated-edge signal
         # the Kelly seed path sizes from (instead of raw win rate).
         self._tracker_mean_pnl: dict[str, float] = {}
+        # M4 (conviction signal): per-wallet typical (median) buy notional in USDC.
+        # The copy size is tilted by event.size_usdc / typical so a trade is read as
+        # a fraction of the trader's normal bet, not by raw dollars. Empty → no tilt.
+        self._tracker_typical_size: dict[str, float] = {}
         # M4: wall-clock time of the last tracker update, for decaying a stale prior.
         self._tracker_updated_at: float = 0.0
         # C4: per-position asyncio locks prevent a double-exit race between two
@@ -98,6 +102,16 @@ class CopyTrader:
         """
         self._tracker_mean_pnl = dict(rois)
         self._tracker_updated_at = time.time()  # M4: stamp for prior-decay
+
+    def update_tracker_typical_sizes(self, sizes: dict[str, float]) -> None:
+        """Replace the per-wallet typical-buy-size map (M4 conviction signal).
+
+        Called by main.py alongside update_tracker_mean_pnl after each
+        TrackerClient.refresh(). The conviction tilt reads each trade's size
+        relative to this trader's median bet, so absolute USDC stops being the
+        (misleading) conviction proxy.
+        """
+        self._tracker_typical_size = dict(sizes)
 
     async def rehydrate_position_cache(self) -> None:
         """Load all open DB positions into the in-memory cache (H11).
@@ -413,6 +427,26 @@ class CopyTrader:
                     sample,
                     ct.kelly_min_trades,
                 )
+
+        # M4: conviction tilt. Scale the copy by the whale's size relative to their
+        # OWN typical bet, so a $2k throwaway from a $5M book is not sized like a $2k
+        # conviction bet from a $50k book. Bounded to [min, max] conviction mult and
+        # applied to whatever the sizing path produced; the max_cap_usdc ceiling below
+        # still hard-clamps, so the tilt can never breach the per-trade cap. No-op when
+        # disabled or when the trader's typical size is unknown (tracker saw no buys).
+        if ct.conviction_sizing_enabled:
+            typical = self._tracker_typical_size.get(event.wallet_address, 0.0)
+            if typical > 0 and event.size_usdc > 0:
+                raw_mult = event.size_usdc / typical
+                conviction_mult = min(max(raw_mult, ct.min_conviction_mult), ct.max_conviction_mult)
+                logger.debug(
+                    "M4 conviction: size=%.0f typical=%.0f raw=%.2f mult=%.2f",
+                    event.size_usdc,
+                    typical,
+                    raw_mult,
+                    conviction_mult,
+                )
+                copy_size_usdc *= conviction_mult
 
         # Hard ceiling regardless of sizing path.
         copy_size_usdc = min(copy_size_usdc, max_cap_usdc)

@@ -172,6 +172,17 @@ class CopyTradingConfig(BaseModel):
     # M4: decay the tracker prior toward neutral (zero edge) as it ages — fresh
     # leaderboard data is more reliable. Weight = 1/(1 + hours_since_last_update).
     tracker_prior_decay_enabled: bool = True
+    # M4 (conviction signal): absolute USDC size is a poor conviction proxy — a $2k
+    # trade from a $5M book is a throwaway, the same $2k from a $50k book is a real
+    # bet. When enabled, the copy size is scaled by the whale's size RELATIVE to
+    # their own typical (median) trade — event.size_usdc / typical_trade_size —
+    # clamped to [min_conviction_mult, max_conviction_mult]. Off by default (opt-in,
+    # like Kelly): when disabled, sizing is unchanged. The max_trade_pct hard ceiling
+    # always applies on top, so a high-conviction tilt can never breach the per-trade
+    # cap. Requires the tracker to have observed buy sizes (typical>0), else no-op.
+    conviction_sizing_enabled: bool = False
+    max_conviction_mult: float = 2.0  # cap size-up from an unusually large whale trade
+    min_conviction_mult: float = 0.5  # floor so a small relative trade is tilted down, not zeroed
 
 
 class RiskManagementConfig(BaseModel):
