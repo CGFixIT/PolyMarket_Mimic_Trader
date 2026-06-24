@@ -71,8 +71,12 @@ class TestTraderScorer:
         assert result is None
 
     def test_ineligible_low_win_rate(self):
+        # H16: min_win_rate is no longer a hard gate; replaced with min_expectancy.
+        # A 40% win rate trader with positive mean_pnl should pass (expectancy > 0.01).
+        # Test low expectancy instead: mean_pnl so small that mean_pnl * log(n+1) < 0.01.
         scorer = TraderScorer(TrackerConfig())
-        result = scorer.score(make_stats(win_rate=0.40))
+        # mean_pnl = 0.0001; expectancy = 0.0001 * log(201) ~ 0.00053 < 0.01
+        result = scorer.score(make_stats(pnl_list=[0.0001, 0.0001, 0.0001, 0.0001, 0.0001]))
         assert result is None
 
     def test_ineligible_few_trades(self):

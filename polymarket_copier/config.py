@@ -26,6 +26,14 @@ class TraderSelectionConfig(BaseModel):
     rebalance_days: int = 7
     half_life_days: float = 14.0
     max_top_traders: int = 5
+    # H14: cap Sharpe proxy at this value to prevent outliers (e.g., lucky streaks)
+    sharpe_cap: float = 3.0
+    # H14: shrink Sharpe toward zero for samples smaller than this
+    sharpe_shrink_min_trades: int = 20
+    # H16: minimum expected ROI per trade (expectancy = mean_pnl * log(n+1))
+    min_expectancy: float = 0.01
+    # H15: also fetch leaderboard in this window (days) to filter for consistency
+    recent_window_days: int = 30
 
 
 class CopyTradingConfig(BaseModel):
