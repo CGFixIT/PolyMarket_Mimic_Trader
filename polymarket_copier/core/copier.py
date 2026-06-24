@@ -708,18 +708,12 @@ class CopyTrader:
         # C4: `AND status='open'` in close_position() is the DB-level guard that
         # prevents a double-record even if the application lock were somehow bypassed.
         pnl = await self.portfolio.close_position(pos.position_id, avg_fill_price, reason)
-        if pnl == 0.0 and reason != ExitReason.HOLD:
-            # close_position returned 0.0 due to the DB race guard (position was
-            # already closed by a concurrent exit path). Do not double-call record_exit.
-            # KNOWN LIMITATION (pre-existing): a genuine break-even close where
-            # exit_price == entry_price exactly also yields pnl==0.0 and takes this
-            # branch, so it skips record_exit + the exit metrics. Rare (exact float
-            # equality on a [0,1] price). The clean fix is to have close_position
-            # signal "already closed" distinctly (Optional[float]/None) rather than
-            # overloading 0.0 — tracked as a follow-up; out of scope for this
-            # observability change to avoid altering close_position's contract.
+        if pnl is None:
+            # close_position returns None when the position was not found or was already
+            # closed by a concurrent exit path (C4 double-exit race guard). Do not
+            # double-call record_exit or record metrics for the same close.
             logger.warning(
-                "close_position returned 0.0 for %s — skipping record_exit (already closed)",
+                "close_position returned None for %s — skipping record_exit (already closed or not found)",
                 pos.position_id,
             )
             return

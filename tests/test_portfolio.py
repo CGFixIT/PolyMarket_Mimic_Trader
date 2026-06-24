@@ -94,7 +94,21 @@ class TestPortfolioManager:
     @pytest.mark.asyncio
     async def test_close_nonexistent(self, portfolio):
         pnl = await portfolio.close_position("ghost", 0.5, ExitReason.STOP_LOSS)
-        assert pnl == 0.0
+        assert pnl is None
+
+    @pytest.mark.asyncio
+    async def test_close_position_break_even(self, portfolio, rm):
+        """A genuine break-even close (exit_price == entry_price) returns 0.0, NOT None.
+        This distinguishes it from the already-closed sentinel (None) so record_exit
+        and metrics are still called for a real (if flat) trade outcome.
+        """
+        pos = await make_position(rm, entry=0.50, size=100.0)
+        await portfolio.open_position(pos)
+        pnl = await portfolio.close_position(pos.position_id, 0.50, ExitReason.STOP_LOSS)
+        assert pnl == pytest.approx(0.0)   # flat PnL — not None
+        assert await portfolio.position_count() == 0
+        report = await portfolio.realized_pnl_report()
+        assert report["disposals"] == 1    # tax lot must be recorded
 
     @pytest.mark.asyncio
     async def test_get_open_positions(self, portfolio, rm):
@@ -200,16 +214,16 @@ class TestUninitializedGuard:
 
 class TestDoubleExitGuard:
     """C4: close_position must be idempotent — a second call on an already-closed
-    position returns 0.0 and does NOT insert a second realized-lot row."""
+    position returns None and does NOT insert a second realized-lot row."""
 
     @pytest.mark.asyncio
-    async def test_second_close_returns_zero(self, portfolio, rm):
+    async def test_second_close_returns_none(self, portfolio, rm):
         pos = await make_position(rm, entry=0.50, size=100.0)
         await portfolio.open_position(pos)
         pnl1 = await portfolio.close_position(pos.position_id, 0.60, ExitReason.TAKE_PROFIT)
         pnl2 = await portfolio.close_position(pos.position_id, 0.60, ExitReason.TAKE_PROFIT)
         assert pnl1 == pytest.approx(10.0)
-        assert pnl2 == 0.0  # race guard: already closed
+        assert pnl2 is None  # race guard: already closed → None sentinel
 
     @pytest.mark.asyncio
     async def test_second_close_does_not_add_extra_lot(self, portfolio, rm):
@@ -231,8 +245,10 @@ class TestDoubleExitGuard:
             portfolio.close_position(pos.position_id, 0.60, ExitReason.TAKE_PROFIT),
             portfolio.close_position(pos.position_id, 0.60, ExitReason.TAKE_PROFIT),
         )
-        # Exactly one winner; the other returns 0.0.
-        assert sorted(pnls) == pytest.approx([0.0, 10.0])
+        # Exactly one winner (10.0 PnL); the loser returns None (race guard).
+        non_none = [p for p in pnls if p is not None]
+        assert len(non_none) == 1
+        assert non_none[0] == pytest.approx(10.0)
         report = await portfolio.realized_pnl_report()
         assert report["disposals"] == 1
 

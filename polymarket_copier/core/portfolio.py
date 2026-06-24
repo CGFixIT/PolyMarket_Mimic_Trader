@@ -114,13 +114,18 @@ class PortfolioManager:
 
     async def close_position(
         self, position_id: str, exit_price: float, reason: ExitReason,
-    ) -> float:
-        """Mark a position closed (guarded against double-close), record a tax lot, and return realized PnL."""
+    ) -> Optional[float]:
+        """Mark a position closed (guarded against double-close), record a tax lot, and return realized PnL.
+
+        Returns the realized PnL (float, possibly 0.0 on a genuine break-even) on success,
+        or None if the position was not found or was already closed by a concurrent exit.
+        Callers must treat None as "already handled" and skip record_exit / metrics.
+        """
         db = self._require_db()
         pos = await self.get_position(position_id)
         if pos is None:
             logger.warning("Position %s not found for closing", position_id)
-            return 0.0
+            return None
         pnl = pos.pnl_at(exit_price)
         closed_at = time.time()
         # C4 guard: `AND status='open'` makes this UPDATE a no-op if another
@@ -136,7 +141,7 @@ class PortfolioManager:
             logger.warning(
                 "Position %s already closed — double-exit race prevented", position_id
             )
-            return 0.0
+            return None
         # Record an immutable tax lot in the SAME transaction as the close, so the
         # ledger can never drift from the positions table.
         cost_basis = pos.entry_price * pos.size_shares
