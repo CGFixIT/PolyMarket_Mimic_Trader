@@ -378,11 +378,10 @@ class TestParseTimestamp:
     def test_iso_string(self):
         assert _parse_timestamp("2023-11-14T22:13:20+00:00") == pytest.approx(1_700_000_000, abs=1)
 
-    def test_invalid_string_returns_current_time(self):
-        before = time.time()
-        result = _parse_timestamp("garbage")
-        after = time.time()
-        assert before <= result <= after
+    def test_invalid_string_returns_zero(self):
+        # L4: invalid timestamps return 0.0 (unknown = stale) instead of time.time()
+        # (which fabricated freshness and inflated recency scores).
+        assert _parse_timestamp("garbage") == 0.0
 
     def test_millis_normalized_to_seconds(self):
         assert _parse_timestamp(1_700_000_000_000) == pytest.approx(1_700_000_000, abs=1)
@@ -390,11 +389,9 @@ class TestParseTimestamp:
     def test_seconds_passthrough(self):
         assert _parse_timestamp(1_700_000_000) == pytest.approx(1_700_000_000)
 
-    def test_unsupported_type_returns_current_time(self):
-        before = time.time()
-        result = _parse_timestamp(None)
-        after = time.time()
-        assert before <= result <= after
+    def test_unsupported_type_returns_zero(self):
+        # L4: unsupported types (None, list, etc.) return 0.0 (unknown = stale).
+        assert _parse_timestamp(None) == 0.0
 
 
 class TestRefreshPipeline:

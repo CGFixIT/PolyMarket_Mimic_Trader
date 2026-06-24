@@ -411,7 +411,10 @@ class TradeMonitor:
         """Polls the Polymarket Data API for new trades from tracked wallets."""
         async with aiohttp.ClientSession(
             headers={"User-Agent": "polymarket-copier/1.0"},
-            connector=aiohttp.TCPConnector(limit=20),
+            # L2: keepalive_timeout=30 keeps TCP connections alive across the 8s
+            # poll cycle so each request reuses the existing TLS session instead of
+            # paying a fresh handshake. Matches the DataClient's connector settings.
+            connector=aiohttp.TCPConnector(limit=20, keepalive_timeout=30),
             timeout=aiohttp.ClientTimeout(total=10),
         ) as session:
             # Use a fixed deadline rather than computing leftover time from elapsed.

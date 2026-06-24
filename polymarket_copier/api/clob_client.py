@@ -88,6 +88,18 @@ class ClobClient:
         if self._executor:
             self._executor.shutdown(wait=False)
 
+    async def preload_credentials(self) -> None:
+        """Eagerly warm up the live CLOB client in the background thread pool (L3).
+
+        create_or_derive_api_creds() is a blocking call that signs a challenge
+        request to derive the CLOB API key from the wallet's private key. It runs
+        lazily on the first live order by default, adding ~200–500ms to copy
+        latency for that first trade. Calling this at startup amortises the cost
+        before any whale trade is detected. No-op in paper mode.
+        """
+        if not self.paper_mode:
+            await self._run_blocking(self._init_live_client)
+
     def _init_live_client(self) -> None:
         """Lazily construct and authenticate the live py-clob-client (thread-safe, single-init)."""
         with self._init_lock:

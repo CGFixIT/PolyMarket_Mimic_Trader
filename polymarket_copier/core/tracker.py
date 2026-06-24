@@ -64,7 +64,10 @@ class TrackerConfig:
     min_expectancy: float = 0.01  # H16: min expected ROI (mean_pnl × log(n+1))
 
     # Scoring parameters
-    half_life_days: float = 14.0  # Recency decay: score halves every N days
+    # L4: dropped from 14 → 7 days. A 14-day half-life let a trader who went
+    # dormant 4 weeks ago retain 25% of their recency score; 7 days drops that
+    # to 6%, properly down-weighting inactivity.
+    half_life_days: float = 7.0  # Recency decay: score halves every N days
     max_top_traders: int = 5  # Number of traders to return
     sharpe_cap: float = 3.0  # H14: cap Sharpe to prevent outlier amplification
     sharpe_shrink_min_trades: int = 20  # H14: shrink Sharpe below this sample size
@@ -601,9 +604,10 @@ def _compute_trader_stats(
 def _parse_timestamp(raw) -> float:
     """Parse ISO 8601 string or numeric timestamp to Unix float.
 
-    Returns time.time() on parse failure so a transient API glitch doesn't
-    permanently zero out a trader's recency score (which happens when
-    last_trade_time==0 flows into _recency_weight()).
+    Returns 0.0 on parse failure (L4). The old fallback of time.time()
+    fabricated "just traded now" freshness for dormant or data-missing traders,
+    inflating their recency score. 0.0 lets _recency_weight() return 0.0 for
+    those traders instead, which is the correct signal: unknown = stale.
     """
     if isinstance(raw, str):
         try:
@@ -611,8 +615,8 @@ def _parse_timestamp(raw) -> float:
 
             return datetime.fromisoformat(raw.replace("Z", "+00:00")).timestamp()
         except ValueError:
-            return time.time()
+            return 0.0
     elif isinstance(raw, (int, float)):
         # If in milliseconds (> year 3000 as seconds ≈ 3.2e10)
         return float(raw) / 1_000.0 if raw > 1e12 else float(raw)
-    return time.time()
+    return 0.0

@@ -103,7 +103,7 @@ class TestAppConfig:
         assert config.trader_selection.min_pnl == 10000
         assert config.trader_selection.min_win_rate == 0.55
         assert config.trader_selection.min_trades == 150  # M12: raised from 50
-        assert config.trader_selection.half_life_days == 14.0
+        assert config.trader_selection.half_life_days == 7.0  # L4: faster recency decay
         assert config.trader_selection.max_top_traders == 5
         # Chunk 2 (H14/H15/H16) trader-selection quality knobs
         assert config.trader_selection.sharpe_cap == 3.0

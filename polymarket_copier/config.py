@@ -26,7 +26,8 @@ class TraderSelectionConfig(BaseModel):
     # ±14%, making winner's curse on top-k selection a near-certainty.
     min_trades: int = 150
     rebalance_days: int = 7
-    half_life_days: float = 14.0
+    # L4: dropped from 14 → 7 days for faster recency decay.
+    half_life_days: float = 7.0
     max_top_traders: int = 5
     # H14: cap Sharpe proxy at this value to prevent outliers (e.g., lucky streaks)
     sharpe_cap: float = 3.0

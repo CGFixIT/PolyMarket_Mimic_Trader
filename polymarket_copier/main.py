@@ -85,6 +85,9 @@ async def run_bot(config_path: Optional[str] = None, mode: Optional[str] = None)
 
     gamma_client = GammaClient()
     clob_client = ClobClient(config)
+    # L3: warm up blocking credential derivation in the thread pool while the
+    # tracker fetch is running so the first live order pays no extra latency.
+    await clob_client.preload_credentials()
 
     tracker_cfg = TrackerConfig(
         min_total_pnl=config.trader_selection.min_pnl,
