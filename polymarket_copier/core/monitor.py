@@ -358,7 +358,11 @@ class TradeMonitor:
 
     async def _handle_ws_message(self, raw: str) -> None:
         """Parse a WebSocket message and emit PriceTick events for subscribed tokens."""
-        events = json.loads(raw)
+        try:
+            events = json.loads(raw)
+        except (json.JSONDecodeError, ValueError) as exc:
+            logger.warning("WS message JSON parse error: %s | raw=%r", exc, raw[:200])
+            return
         if not isinstance(events, list):
             events = [events]
 
