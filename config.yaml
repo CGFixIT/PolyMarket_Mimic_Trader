@@ -1,5 +1,6 @@
 mode: paper
 polling_interval_seconds: 8
+poll_jitter_seconds: 2.0          # H17: randomize poll cadence (front-run resistance; 0 disables)
 
 trader_selection:
   min_pnl: 10000
@@ -16,6 +17,9 @@ copy_trading:
   max_price_deviation: 0.02
   max_concurrent_positions: 10
   max_positions_per_token: 3      # M9: cap copies on one token (0 disables)
+  revalidate_edge_before_order: true  # M1: re-check price after lock; skip if edge collapsed
+  entry_order_type: FOK           # M5: all-or-nothing immediate entry fill
+  exit_order_type: FAK            # M5: take available liquidity now on exit
   min_market_volume: 5000
   max_trade_age_seconds: 12
   mirror_source_exits: true

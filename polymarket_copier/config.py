@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
-from typing import Optional
+from typing import Literal, Optional
 
 import yaml
 from dotenv import load_dotenv
@@ -56,6 +56,11 @@ class CopyTradingConfig(BaseModel):
     # buying the same token would otherwise open unbounded copies on one outcome,
     # concentrating idiosyncratic risk. 0 disables the per-token cap.
     max_positions_per_token: int = 3
+    # M1: re-fetch the price after acquiring the entry lock and skip if it moved
+    # adversely beyond max_price_deviation since detection. The lock-wait window
+    # (another concurrent entry, sizing, DB I/O) lets the price drift; without
+    # this we'd race a stale edge. False disables the second fetch.
+    revalidate_edge_before_order: bool = True
     min_market_volume: float = 5000
     # Skip trades older than this at detection time — by then the source's alpha
     # has decayed and we'd only be buying into their price impact (adverse
@@ -64,6 +69,18 @@ class CopyTradingConfig(BaseModel):
     # When True, if a tracked trader sells a token we hold a copy position in,
     # treat it as an exit signal and close our position (ExitReason.SOURCE_EXIT).
     mirror_source_exits: bool = True
+    # M5: order-type selection, made explicit and tunable.
+    #   ENTRY → FOK (Fill-Or-Kill): all-or-nothing immediate fill. We want the full
+    #     intended copy size at the validated price or nothing — a partial entry at a
+    #     drifting average is worse than skipping. Never rests as a GTC limit at the
+    #     midpoint (which fills adversely or never).
+    #   EXIT  → FAK (Fill-And-Kill / IOC): take whatever liquidity is on the bid NOW,
+    #     cancel the remainder. In a fast down-move a resting GTC limit trails the book
+    #     and never liquidates (unbounded loss); FAK guarantees we hit available depth.
+    # Both are configurable for venues/strategies that prefer different semantics.
+    # Typed as the CLOB's valid order types so an invalid value is rejected at load.
+    entry_order_type: Literal["GTC", "FOK", "GTD", "FAK"] = "FOK"
+    exit_order_type: Literal["GTC", "FOK", "GTD", "FAK"] = "FAK"
     # Paper-mode fill simulation: apply half-spread slippage + taker fee so
     # paper PnL reflects live execution costs rather than zero-cost fills.
     paper_fill_slippage_pct: float = 0.005   # ~0.5% half-spread
@@ -136,6 +153,10 @@ class LoggingConfig(BaseModel):
 class AppConfig(BaseModel):
     mode: str = "paper"
     polling_interval_seconds: int = 8
+    # H17: bound (seconds) on poll-interval jitter and per-wallet phase offset.
+    # Randomizes the poll cadence so an observer can't predict when we detect a
+    # whale's trade and front-run our copy. 0 disables (fixed periodic polling).
+    poll_jitter_seconds: float = 2.0
     max_tracked_traders: int = 5
 
     trader_selection: TraderSelectionConfig = Field(default_factory=TraderSelectionConfig)

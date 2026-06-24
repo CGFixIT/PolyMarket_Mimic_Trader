@@ -266,6 +266,33 @@ class CopyTrader:
         #        placement I/O — acceptable here because we copy at most 5 wallets
         #        and concurrent entry events are rare and brief.
         async with self._entry_lock:
+            # 6b. M1: revalidate the edge AFTER acquiring the entry lock. Between the
+            #     initial price fetch and here, time passed — sizing, DB queries, and
+            #     (critically) waiting behind another concurrent entry that held the
+            #     lock. If the price moved adversely beyond max_price_deviation since
+            #     we sized, the edge we validated has collapsed; skip rather than race
+            #     a stale entry. This runs before any exposure is reserved, so there
+            #     is nothing to release on the skip path.
+            if ct.revalidate_edge_before_order:
+                fresh_price = await self.gamma.get_market_price(event.token_id)
+                if fresh_price is None:
+                    if self.config.risk_management.fail_closed_on_missing_data:
+                        logger.info(
+                            "Skip: revalidation price unavailable for %s (fail-closed)",
+                            event.token_id[:10],
+                        )
+                        return
+                else:
+                    reval_dev = (fresh_price - current_price) / max(current_price, 1e-9)
+                    if reval_dev > ct.max_price_deviation:
+                        logger.info(
+                            "Skip: edge collapsed since detection "
+                            "(price %.4f -> %.4f, +%.1f%% > max %.1f%%)",
+                            current_price, fresh_price, reval_dev * 100,
+                            ct.max_price_deviation * 100,
+                        )
+                        return
+
             # 7. Cheap gating checks FIRST — before registering exposure, so that a
             #    rejection here can never leak phantom exposure into the RiskManager.
             count = await self.portfolio.position_count()
@@ -316,9 +343,10 @@ class CopyTrader:
                 side="BUY",
                 price=current_price,
                 size_usdc=copy_size_usdc,
-                # C2: FOK ensures entries either fill immediately or cancel — no resting
-                # GTC limit at the midpoint that fills adversely or never at all.
-                order_type="FOK",
+                # C2/M5: FOK (configurable via entry_order_type) ensures entries either
+                # fill immediately in full or cancel — no resting GTC limit at the
+                # midpoint that fills adversely or never at all.
+                order_type=ct.entry_order_type,
             )
 
             # 10. Place order. On ANY failure, release the exposure build_position
@@ -511,10 +539,11 @@ class CopyTrader:
             side="SELL",
             price=price,
             size_usdc=max(price * exit_shares, _EPSILON_USDC),
-            # C2: FAK (Fill-And-Kill / IOC) aggressively hits the bid instead of
-            # resting as a GTC limit at the midpoint, which in a fast down-move
-            # trails the book and never liquidates (unbounded loss).
-            order_type="FAK",
+            # C2/M5: FAK (Fill-And-Kill / IOC, configurable via exit_order_type)
+            # aggressively hits the bid instead of resting as a GTC limit at the
+            # midpoint, which in a fast down-move trails the book and never
+            # liquidates (unbounded loss).
+            order_type=self.config.copy_trading.exit_order_type,
         )
 
         # Retry up to 3 times with exponential backoff. Only close the DB record

@@ -117,3 +117,17 @@ class TestAppConfig:
         assert config.copy_trading.max_positions_per_token == 3       # M9
         assert config.risk_management.low_entry_threshold == 0.20     # L5
         assert config.risk_management.low_entry_tp_fraction == 0.25   # L5
+
+    def test_chunk4_execution_quality_fields(self):
+        # Chunk 4 (H17/M1/M5) execution-quality knobs
+        config = AppConfig()
+        assert config.poll_jitter_seconds == 2.0                          # H17
+        assert config.copy_trading.revalidate_edge_before_order is True    # M1
+        assert config.copy_trading.entry_order_type == "FOK"               # M5
+        assert config.copy_trading.exit_order_type == "FAK"                # M5
+
+    def test_invalid_order_type_rejected(self):
+        # M5: order types are typed as the CLOB's Literal set; bad values are rejected.
+        from pydantic import ValidationError
+        with pytest.raises(ValidationError):
+            AppConfig(copy_trading={"entry_order_type": "BOGUS"})

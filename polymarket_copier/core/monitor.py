@@ -31,6 +31,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import random
 import time
 from collections import OrderedDict
 from dataclasses import dataclass, field
@@ -61,6 +62,8 @@ _POLL_INTERVAL_SEC   = 8      # seconds between wallet activity polls
 _MAX_TRADES_PER_POLL = 50     # number of recent trades to fetch per poll cycle
 _MAX_WS_RETRIES      = 5      # consecutive failures before logging a warning burst
 _WS_MAX_BACKOFF      = 30.0   # H10: cap so WS retries at most every 30s, never 80s+
+_POLL_JITTER_SEC     = 2.0    # H17: bound on poll-interval jitter + per-wallet stagger
+_MIN_POLL_FLOOR      = 1.0    # H17: never let jitter drive the cycle below this floor
 
 
 # ─── Data Models ──────────────────────────────────────────────────────────────
@@ -134,6 +137,8 @@ class TradeMonitor:
         prime_on_start:  bool  = True,
         rate_limiter:    Optional[AsyncLimiter] = None,
         ws_max_backoff:  float = _WS_MAX_BACKOFF,
+        poll_jitter:     float = _POLL_JITTER_SEC,
+        jitter_seed:     Optional[int] = None,
     ):
         if not tracked_wallets:
             raise ValueError("tracked_wallets must be non-empty.")
@@ -145,6 +150,14 @@ class TradeMonitor:
         self._ws_url        = ws_url
         self._data_api_base = data_api_base
         self._ws_max_backoff = ws_max_backoff
+        # H17: front-run resistance. A perfectly periodic poll cadence on a fixed
+        # wall-clock schedule lets an observer predict exactly when we'll detect a
+        # whale's trade and front-run our copy order. poll_jitter bounds both the
+        # per-cycle interval jitter and the per-wallet phase offset that decorrelate
+        # our timing. jitter_seed makes the RNG deterministic for tests; in
+        # production it is None (system-seeded, genuinely unpredictable).
+        self._poll_jitter = max(0.0, poll_jitter)
+        self._rng = random.Random(jitter_seed)
         # Rate-limit the hot REST poll path to avoid 429s from the Data API.
         # Default: 25 requests / 60 s (headroom below the assumed 30/min cap).
         # Inject a custom limiter in main.py to share budget across components.
@@ -371,6 +384,18 @@ class TradeMonitor:
 
     # ── REST Polling Loop ─────────────────────────────────────────────────────
 
+    def _next_interval(self) -> float:
+        """H17: poll interval with bounded jitter so the cadence is unpredictable.
+
+        Returns poll_interval ± up to poll_jitter seconds, floored at _MIN_POLL_FLOOR
+        so jitter can never drive the cycle to a near-zero spin. With poll_jitter=0
+        this is exactly poll_interval (deterministic — preserves legacy behaviour).
+        """
+        if self._poll_jitter <= 0:
+            return self._poll_interval
+        jittered = self._poll_interval + self._rng.uniform(-self._poll_jitter, self._poll_jitter)
+        return max(jittered, _MIN_POLL_FLOOR)
+
     async def _poll_loop(self) -> None:
         """Polls the Polymarket Data API for new trades from tracked wallets."""
         async with aiohttp.ClientSession(
@@ -381,13 +406,14 @@ class TradeMonitor:
             # Use a fixed deadline rather than computing leftover time from elapsed.
             # This prevents drift: a slow poll (e.g. 9s on an 8s interval) would
             # previously clamp sleep to 0 and effectively double the next interval.
-            next_deadline = time.monotonic() + self._poll_interval
+            next_deadline = time.monotonic() + self._next_interval()
             while not self._stop_event.is_set():
                 await self._poll_all_wallets(session)
                 self.last_poll_completed_at = time.time()
 
                 sleep = max(0.0, next_deadline - time.monotonic())
-                next_deadline += self._poll_interval
+                # H17: each cycle advances by a freshly-jittered interval.
+                next_deadline += self._next_interval()
                 logger.debug("Poll cycle done. Next in %.2fs.", sleep)
 
                 if sleep > 0.001:
@@ -400,9 +426,16 @@ class TradeMonitor:
                         pass    # Normal — sleep elapsed, continue polling
 
     async def _poll_all_wallets(self, session: aiohttp.ClientSession) -> None:
-        """Fetch activity for all tracked wallets concurrently."""
+        """Fetch activity for all tracked wallets concurrently.
+
+        H17: each wallet's fetch is offset by a small, freshly-drawn per-wallet
+        phase delay in [0, poll_jitter]. Without it every wallet is polled at the
+        exact same instant each cycle, so an observer who learns the schedule of
+        one wallet learns it for all. The bounded offset decorrelates per-wallet
+        timing while keeping detection latency within poll_jitter of immediate.
+        """
         tasks = [
-            self._poll_wallet(session, wallet)
+            self._poll_wallet_staggered(session, wallet)
             for wallet in self._wallets
         ]
         results = await asyncio.gather(*tasks, return_exceptions=True)
@@ -410,6 +443,14 @@ class TradeMonitor:
         for wallet, result in zip(self._wallets, results, strict=True):
             if isinstance(result, Exception):
                 logger.warning("Poll failed for wallet %s: %s", wallet[:10], result)
+
+    async def _poll_wallet_staggered(
+        self, session: aiohttp.ClientSession, wallet: str
+    ) -> None:
+        """Apply the H17 per-wallet phase offset, then poll the wallet."""
+        if self._poll_jitter > 0:
+            await asyncio.sleep(self._rng.uniform(0.0, self._poll_jitter))
+        await self._poll_wallet(session, wallet)
 
     async def _poll_wallet(
         self,

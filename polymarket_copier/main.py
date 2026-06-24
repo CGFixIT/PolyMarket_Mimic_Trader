@@ -105,6 +105,7 @@ async def run_bot(config_path: Optional[str] = None, mode: Optional[str] = None)
         on_price=copier.handle_price_tick,
         poll_interval=config.polling_interval_seconds,
         ws_max_backoff=config.risk_management.ws_max_backoff_seconds,
+        poll_jitter=config.poll_jitter_seconds,
     )
     copier.monitor = monitor
 

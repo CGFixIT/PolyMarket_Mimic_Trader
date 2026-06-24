@@ -502,3 +502,80 @@ class TestSetWallets:
         # Must not raise — the pre-fix code KeyError'd here.
         result = monitor._filter_new_trades("0xnew", activity, prime=True)
         assert result == []  # prime=True → seeds baseline, returns nothing
+
+
+# ─── H17: Poll-cadence jitter (front-run resistance) ──────────────────────────
+
+class TestPollJitter:
+    """H17: the poll cadence must be unpredictable so an observer can't time our
+    detection and front-run the copy. _next_interval() adds bounded jitter and the
+    per-wallet stagger decorrelates wallet timing."""
+
+    def test_zero_jitter_returns_exact_interval(self):
+        # poll_jitter=0 must be exactly periodic (legacy behaviour preserved).
+        monitor = TradeMonitor(
+            tracked_wallets=["0xWHALE"], on_trade=_noop_trade,
+            poll_interval=8.0, poll_jitter=0.0,
+        )
+        for _ in range(20):
+            assert monitor._next_interval() == 8.0
+
+    def test_jitter_stays_within_bounds(self):
+        # With jitter=2, every interval must lie in [interval-2, interval+2].
+        monitor = TradeMonitor(
+            tracked_wallets=["0xWHALE"], on_trade=_noop_trade,
+            poll_interval=8.0, poll_jitter=2.0, jitter_seed=42,
+        )
+        samples = [monitor._next_interval() for _ in range(1000)]
+        assert all(6.0 <= s <= 10.0 for s in samples)
+        # Must actually vary — not a constant.
+        assert len(set(samples)) > 100
+
+    def test_jitter_mean_approximates_base_interval(self):
+        # Symmetric jitter → mean stays close to the base interval (no systematic drift).
+        monitor = TradeMonitor(
+            tracked_wallets=["0xWHALE"], on_trade=_noop_trade,
+            poll_interval=8.0, poll_jitter=2.0, jitter_seed=7,
+        )
+        samples = [monitor._next_interval() for _ in range(5000)]
+        assert abs(sum(samples) / len(samples) - 8.0) < 0.15
+
+    def test_jitter_never_below_floor(self):
+        # Even with jitter larger than the interval, the floor protects against a
+        # near-zero spin loop.
+        monitor = TradeMonitor(
+            tracked_wallets=["0xWHALE"], on_trade=_noop_trade,
+            poll_interval=2.0, poll_jitter=10.0, jitter_seed=1,
+        )
+        samples = [monitor._next_interval() for _ in range(1000)]
+        assert all(s >= 1.0 for s in samples)  # _MIN_POLL_FLOOR
+
+    def test_seed_makes_jitter_deterministic(self):
+        # Same seed → same sequence (reproducible tests, but still unpredictable
+        # to an observer who doesn't know the seed; production uses seed=None).
+        m1 = TradeMonitor(tracked_wallets=["0xW"], on_trade=_noop_trade,
+                          poll_interval=8.0, poll_jitter=2.0, jitter_seed=99)
+        m2 = TradeMonitor(tracked_wallets=["0xW"], on_trade=_noop_trade,
+                          poll_interval=8.0, poll_jitter=2.0, jitter_seed=99)
+        assert [m1._next_interval() for _ in range(50)] == \
+               [m2._next_interval() for _ in range(50)]
+
+    @pytest.mark.asyncio
+    async def test_staggered_poll_still_fetches_all_wallets(self):
+        # The per-wallet stagger must not drop any wallet — all still get polled.
+        polled = []
+
+        async def capture_trade(event):
+            return None
+
+        monitor = TradeMonitor(
+            tracked_wallets=["0xA", "0xB", "0xC"], on_trade=capture_trade,
+            poll_jitter=0.01, jitter_seed=3, prime_on_start=False,
+        )
+
+        async def fake_poll(session, wallet):
+            polled.append(wallet)
+
+        monitor._poll_wallet = fake_poll
+        await monitor._poll_all_wallets(_FakeSessionMonitor([]))
+        assert sorted(polled) == ["0xa", "0xb", "0xc"]

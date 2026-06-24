@@ -186,6 +186,107 @@ class TestOrderFailureExposureRelease:
         assert await copier.portfolio.position_count() == 1
 
 
+class TestEdgeRevalidation:
+    """M1: re-fetch the price after acquiring the entry lock and skip if it moved
+    adversely beyond max_price_deviation since detection. Guards against entering on
+    a stale edge after waiting behind another concurrent entry."""
+
+    @pytest.mark.asyncio
+    async def test_edge_collapse_skips_entry(self, copier, gamma):
+        # Detection price 0.50 (passes H6 gate vs event 0.50), but by the time we
+        # hold the lock the price jumped to 0.60 (+20% adverse) → skip.
+        gamma.get_market_price = AsyncMock(side_effect=[0.50, 0.60])
+        await copier.handle_trade_event(buy_event(price=0.50))
+        assert await copier.portfolio.position_count() == 0
+        # No phantom exposure left behind (skip ran before build_position).
+        assert copier.risk.market_exposure("mkt-a") == pytest.approx(0.0)
+
+    @pytest.mark.asyncio
+    async def test_favorable_move_still_enters(self, copier, gamma):
+        # Price dropped 0.50 → 0.45 between detection and order: favorable, more
+        # upside to the same TP. Revalidation must NOT skip a favorable move.
+        gamma.get_market_price = AsyncMock(side_effect=[0.50, 0.45])
+        await copier.handle_trade_event(buy_event(price=0.50))
+        assert await copier.portfolio.position_count() == 1
+
+    @pytest.mark.asyncio
+    async def test_small_adverse_move_within_tolerance_enters(self, copier, gamma):
+        # +1% move (0.50 → 0.505) is within max_price_deviation (2%) → still enters.
+        gamma.get_market_price = AsyncMock(side_effect=[0.50, 0.505])
+        await copier.handle_trade_event(buy_event(price=0.50))
+        assert await copier.portfolio.position_count() == 1
+
+    @pytest.mark.asyncio
+    async def test_revalidation_disabled_skips_second_fetch(self, copier, gamma):
+        # With revalidation OFF, the adverse 0.60 second value is never consumed —
+        # the position opens at the detection price (proves no second fetch ran).
+        copier.config.copy_trading.revalidate_edge_before_order = False
+        gamma.get_market_price = AsyncMock(side_effect=[0.50, 0.60])
+        await copier.handle_trade_event(buy_event(price=0.50))
+        assert await copier.portfolio.position_count() == 1
+
+    @pytest.mark.asyncio
+    async def test_revalidation_price_unavailable_fails_closed(self, copier, gamma):
+        # Second fetch returns None → fail-closed skip (no trading on missing data).
+        gamma.get_market_price = AsyncMock(side_effect=[0.50, None])
+        await copier.handle_trade_event(buy_event(price=0.50))
+        assert await copier.portfolio.position_count() == 0
+
+
+class TestOrderTypeSelection:
+    """M5: entries use FOK (all-or-nothing immediate), exits use FAK (take available
+    liquidity now). Both are configurable; verify the correct type reaches the CLOB."""
+
+    @pytest.mark.asyncio
+    async def test_entry_places_fok_order(self, copier):
+        captured = []
+        orig = copier.clob.place_order
+
+        async def spy(order):
+            captured.append(order)
+            return await orig(order)
+
+        copier.clob.place_order = spy
+        await copier.handle_trade_event(buy_event())
+        buys = [o for o in captured if o.side == "BUY"]
+        assert buys, "no entry order placed"
+        assert buys[0].order_type == "FOK"
+
+    @pytest.mark.asyncio
+    async def test_exit_places_fak_order(self, copier):
+        from polymarket_copier.core.monitor import PriceTick
+        await copier.handle_trade_event(buy_event(price=0.50, token="tok-a"))
+        captured = []
+        orig = copier.clob.place_order
+
+        async def spy(order):
+            captured.append(order)
+            return await orig(order)
+
+        copier.clob.place_order = spy
+        # Price jumps to TP (0.70 for entry 0.50) → exit fires.
+        await copier.handle_price_tick(PriceTick(token_id="tok-a", price=0.72))
+        sells = [o for o in captured if o.side == "SELL"]
+        assert sells, "no exit order placed"
+        assert sells[0].order_type == "FAK"
+        assert await copier.portfolio.position_count() == 0
+
+    @pytest.mark.asyncio
+    async def test_entry_order_type_is_configurable(self, copier):
+        copier.config.copy_trading.entry_order_type = "GTC"
+        captured = []
+        orig = copier.clob.place_order
+
+        async def spy(order):
+            captured.append(order)
+            return await orig(order)
+
+        copier.clob.place_order = spy
+        await copier.handle_trade_event(buy_event())
+        buys = [o for o in captured if o.side == "BUY"]
+        assert buys and buys[0].order_type == "GTC"
+
+
 class TestHandlePriceTick:
     @pytest.mark.asyncio
     async def test_take_profit_exit(self, copier):
