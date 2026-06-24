@@ -108,6 +108,15 @@ class CopyTradingConfig(BaseModel):
             raise ValueError("live_retry_slippage_pct must be <= 0.05 (hard ceiling)")
         if self.live_order_max_retries not in (0, 1):
             raise ValueError("live_order_max_retries must be 0 or 1")
+        # Slippage parity: live mode must be at least as permissive as paper mode.
+        # If paper_fill_slippage_pct > max_live_slippage_pct, paper PnL is penalised
+        # more than live execution would be, making paper results misleadingly pessimistic.
+        if self.paper_fill_slippage_pct > self.max_live_slippage_pct:
+            raise ValueError(
+                "max_live_slippage_pct must be >= paper_fill_slippage_pct so paper PnL "
+                "reflects live execution costs rather than a more-penalised simulation "
+                f"(got max_live={self.max_live_slippage_pct:.4f} < paper={self.paper_fill_slippage_pct:.4f})"
+            )
         return self
 
     # Paper-mode fill simulation: apply half-spread slippage + taker fee so
