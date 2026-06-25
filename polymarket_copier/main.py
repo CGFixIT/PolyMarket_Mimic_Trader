@@ -86,7 +86,10 @@ async def run_bot(config_path: Optional[str] = None, mode: Optional[str] = None)
     # Restore open positions to risk_manager exposure tracking on restart.
     # rehydrate_exposure() registers the exposure and warns (rather than
     # silently carrying) if a since-lowered cap is now breached.
-    for pos in await portfolio.get_open_positions():
+    # Fetch once here; pass the same list to rehydrate_position_cache() below
+    # to avoid a redundant DB round-trip.
+    startup_positions = await portfolio.get_open_positions()
+    for pos in startup_positions:
         risk_manager.rehydrate_exposure(
             market_id=pos.market_id,
             trader_address=pos.trader_address,
@@ -141,7 +144,7 @@ async def run_bot(config_path: Optional[str] = None, mode: Optional[str] = None)
     copier._peak_persist_interval = config.peak_persist_interval_seconds
     # H11: warm the in-memory position cache from the DB so handle_price_tick()
     # has zero-latency position lookups from the first WS tick onward.
-    await copier.rehydrate_position_cache()
+    await copier.rehydrate_position_cache(open_positions=startup_positions)
 
     shutdown_event = asyncio.Event()
 

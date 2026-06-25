@@ -33,9 +33,10 @@ from polymarket_copier.models.types import Market
 
 
 class _FakeResp:
-    def __init__(self, data=None, status=200):
+    def __init__(self, data=None, status=200, reason="OK"):
         self._data = data if data is not None else []
         self.status = status
+        self.reason = reason
 
     async def __aenter__(self):
         return self
@@ -48,12 +49,13 @@ class _FakeResp:
 
 
 class _FakeSession:
-    def __init__(self, data=None, status=200):
+    def __init__(self, data=None, status=200, reason="OK"):
         self._data = data if data is not None else []
         self._status = status
+        self._reason = reason
 
     def get(self, url, params=None):
-        return _FakeResp(self._data, self._status)
+        return _FakeResp(self._data, self._status, self._reason)
 
 
 # ─── Shared fixtures ──────────────────────────────────────────────────────────
