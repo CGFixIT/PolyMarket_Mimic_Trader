@@ -306,6 +306,48 @@ def _orchestrator_client(timeout=0.05) -> ClobClient:
     return c
 
 
+class TestTickRounding:
+    """M15: _round_exec_to_tick snaps the submitted price to the venue tick grid."""
+
+    def test_buy_rounds_up_to_tick(self, paper_client):
+        paper_client.config.copy_trading.order_price_tick = 0.01
+        # 0.3774 (0.37 after 2% slippage) must round UP so the BUY still crosses.
+        assert paper_client._round_exec_to_tick(0.3774, "BUY") == pytest.approx(0.38)
+
+    def test_sell_rounds_down_to_tick(self, paper_client):
+        paper_client.config.copy_trading.order_price_tick = 0.01
+        # 0.3626 (0.37 after -2% slippage) must round DOWN so the SELL still hits the bid.
+        assert paper_client._round_exec_to_tick(0.3626, "SELL") == pytest.approx(0.36)
+
+    def test_already_on_tick_unchanged(self, paper_client):
+        paper_client.config.copy_trading.order_price_tick = 0.01
+        assert paper_client._round_exec_to_tick(0.42, "BUY") == pytest.approx(0.42)
+        assert paper_client._round_exec_to_tick(0.42, "SELL") == pytest.approx(0.42)
+
+    def test_finer_tick_grid(self, paper_client):
+        paper_client.config.copy_trading.order_price_tick = 0.001
+        assert paper_client._round_exec_to_tick(0.37745, "BUY") == pytest.approx(0.378)
+        assert paper_client._round_exec_to_tick(0.37745, "SELL") == pytest.approx(0.377)
+
+    def test_clamped_inside_unit_interval(self, paper_client):
+        paper_client.config.copy_trading.order_price_tick = 0.01
+        # A BUY rounding past 1.0 is pulled back to the last tradeable tick (0.99).
+        assert paper_client._round_exec_to_tick(0.999, "BUY") == pytest.approx(0.99)
+        # A SELL rounding to 0.0 is pulled up to the first tradeable tick (0.01).
+        assert paper_client._round_exec_to_tick(0.004, "SELL") == pytest.approx(0.01)
+
+    def test_zero_tick_disables_rounding(self, paper_client):
+        paper_client.config.copy_trading.order_price_tick = 0.0
+        assert paper_client._round_exec_to_tick(0.3774, "BUY") == pytest.approx(0.3774)
+
+    def test_no_subtick_float_noise(self, paper_client):
+        # Float accumulation (0.01 * 38) can leave noise like 0.38000000000000006;
+        # the helper quantizes it so the venue sees a clean on-tick value.
+        paper_client.config.copy_trading.order_price_tick = 0.01
+        result = paper_client._round_exec_to_tick(0.3774, "BUY")
+        assert result == round(result, 10)
+
+
 class TestExtractLiveFields:
     def test_extracts_variants(self):
         oid, filled, avg = _extract_live_fields({"orderID": "o1", "matched_amount": "40", "price": "0.51"})
