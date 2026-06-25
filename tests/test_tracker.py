@@ -415,7 +415,7 @@ class TestRefreshPipeline:
             patch.object(
                 client,
                 "_build_trader_stats",
-                new=AsyncMock(side_effect=lambda session, entry: make_stats(pnl_list=[10.0, 12.0, 11.0, 13.0])),
+                new=AsyncMock(side_effect=lambda session, entry, **kw: make_stats(pnl_list=[10.0, 12.0, 11.0, 13.0])),
             ),
         ):
             result = await client.refresh()
@@ -460,7 +460,7 @@ class TestRefreshPipeline:
         ]
         recent_window = [{"name": "0xA"}, {"name": "0xB"}]
 
-        async def stats_or_fail(session, entry):
+        async def stats_or_fail(session, entry, **kw):
             if entry["name"] == "0xB":
                 raise RuntimeError("activity fetch failed")
             return make_stats(pnl_list=[10.0, 12.0, 11.0, 13.0])
@@ -493,3 +493,93 @@ class TestTrackerAccessors:
     def test_needs_rebalance_true_when_never_refreshed(self):
         # _last_refresh defaults to 0.0, so the elapsed interval is enormous.
         assert TrackerClient().needs_rebalance is True
+
+
+class TestStatsCache:
+    def test_cache_miss_when_empty(self):
+        client = TrackerClient()
+        assert not client._is_stats_cached("0xA")
+
+    def test_cache_hit_after_population(self):
+        client = TrackerClient(config=TrackerConfig(activity_cache_ttl_hours=6.0))
+        stats = make_stats()
+        client._stats_cache["0xA"] = (stats, time.time())
+        assert client._is_stats_cached("0xA")
+
+    def test_cache_miss_when_expired(self):
+        client = TrackerClient(config=TrackerConfig(activity_cache_ttl_hours=1.0))
+        stats = make_stats()
+        # Populate cache with a timestamp 2 hours in the past
+        client._stats_cache["0xA"] = (stats, time.time() - 7200)
+        assert not client._is_stats_cached("0xA")
+
+    def test_cache_disabled_when_ttl_zero(self):
+        client = TrackerClient(config=TrackerConfig(activity_cache_ttl_hours=0.0))
+        stats = make_stats()
+        client._stats_cache["0xA"] = (stats, time.time())
+        # TTL=0 means caching is disabled; always returns False
+        assert not client._is_stats_cached("0xA")
+
+    def test_invalidate_specific_address(self):
+        client = TrackerClient()
+        stats = make_stats()
+        client._stats_cache["0xA"] = (stats, time.time())
+        client._stats_cache["0xB"] = (stats, time.time())
+        client.invalidate_stats_cache("0xA")
+        assert "0xA" not in client._stats_cache
+        assert "0xB" in client._stats_cache
+
+    def test_invalidate_all(self):
+        client = TrackerClient()
+        stats = make_stats()
+        client._stats_cache["0xA"] = (stats, time.time())
+        client._stats_cache["0xB"] = (stats, time.time())
+        client.invalidate_stats_cache()
+        assert len(client._stats_cache) == 0
+
+    @pytest.mark.asyncio
+    async def test_cached_stats_skip_activity_fetch(self):
+        """When cache is warm, _fetch_activity should not be called."""
+        client = TrackerClient(config=TrackerConfig(activity_cache_ttl_hours=6.0))
+        stats = make_stats(pnl_list=[10.0, 12.0])
+        client._stats_cache["0xA"] = (stats, time.time())
+
+        fetch_called = []
+
+        async def fake_fetch(session, address):
+            fetch_called.append(address)
+            return []
+
+        entry = {"name": "0xA", "pnl": 50000, "pseudonym": "A"}
+        with patch.object(client, "_fetch_activity", side_effect=fake_fetch):
+            result = await client._build_trader_stats(session=None, leaderboard_entry=entry)
+
+        assert result is stats  # returned cached object
+        assert fetch_called == []  # no API call made
+
+    @pytest.mark.asyncio
+    async def test_force_refresh_bypasses_cache(self):
+        """force_refresh=True should ignore cache and re-fetch activity."""
+        client = TrackerClient(config=TrackerConfig(activity_cache_ttl_hours=6.0))
+        old_stats = make_stats(pnl_list=[10.0])
+        client._stats_cache["0xA"] = (old_stats, time.time())
+
+        fresh_trades = [
+            {"type": "BUY", "outcomeIndex": "0", "size": "100", "price": "0.5", "timestamp": str(int(time.time()))},
+            {
+                "type": "SELL",
+                "outcomeIndex": "0",
+                "size": "100",
+                "price": "0.6",
+                "timestamp": str(int(time.time()) + 3600),
+            },
+        ]
+
+        entry = {"name": "0xA", "pnl": 50000, "pseudonym": "A"}
+        with patch.object(client, "_fetch_activity", new=AsyncMock(return_value=fresh_trades)):
+            result = await client._build_trader_stats(session=AsyncMock(), leaderboard_entry=entry, force_refresh=True)
+
+        # Result is freshly computed (not the old cached object)
+        assert result is not old_stats
+        # Cache updated with new stats
+        assert client._stats_cache["0xA"][0] is result

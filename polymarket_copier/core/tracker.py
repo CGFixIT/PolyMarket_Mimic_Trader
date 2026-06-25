@@ -80,6 +80,13 @@ class TrackerConfig:
     # Rebalance schedule
     rebalance_interval_days: float = 7.0
 
+    # Per-trader activity cache TTL. On the 7-day rebalance cycle, re-fetching
+    # N×500 trades per candidate on every refresh() wastes quota and adds latency
+    # for traders whose activity hasn't materially changed. Cache stats for this
+    # many hours; a force_refresh=True call bypasses the cache entirely.
+    # 0 disables caching (always re-fetch).
+    activity_cache_ttl_hours: float = 6.0
+
 
 # ─── Data Models ──────────────────────────────────────────────────────────────
 
@@ -294,26 +301,36 @@ class TrackerClient:
         self._last_refresh: float = 0.0
         self._external_session = session is not None
         self._session = session
+        # {address: (TraderStats, fetched_at_unix)} — avoids redundant /activity calls
+        # on the 7-day rebalance cycle when the candidate set is stable.
+        self._stats_cache: Dict[str, Tuple[TraderStats, float]] = {}
 
-    async def refresh(self) -> List[ScoredTrader]:
+    async def refresh(self, force_refresh: bool = False) -> List[ScoredTrader]:
         """
         Full pipeline: leaderboard → per-trader stats → scoring → ranking.
         Caches results in self.top_traders.
         Uses an external session if provided; otherwise creates a temporary one.
+
+        Per-trader activity stats are cached for activity_cache_ttl_hours to
+        avoid redundant API calls on the rebalance cycle when the candidate set
+        is stable. Pass force_refresh=True to bypass the cache (e.g. on startup
+        or after a significant market event).
         """
         if self._session is not None and not self._session.closed:
             session = self._session
             # Use external session directly (don't close it)
-            return await self._refresh_with_session(session)
+            return await self._refresh_with_session(session, force_refresh=force_refresh)
 
         # Create temporary session; close after use
         async with aiohttp.ClientSession(
             headers={"User-Agent": "polymarket-copier/1.0"},
             timeout=aiohttp.ClientTimeout(total=15),
         ) as session:
-            return await self._refresh_with_session(session)
+            return await self._refresh_with_session(session, force_refresh=force_refresh)
 
-    async def _refresh_with_session(self, session: aiohttp.ClientSession) -> List[ScoredTrader]:
+    async def _refresh_with_session(
+        self, session: aiohttp.ClientSession, force_refresh: bool = False
+    ) -> List[ScoredTrader]:
         """Run the refresh pipeline with a given session."""
         # H15: fetch both all-time and recent windows; require traders to rank in both
         all_window, recent_window = await self._fetch_dual_leaderboards(session)
@@ -330,14 +347,18 @@ class TrackerClient:
             logger.warning("No traders found in both all-time and recent windows.")
             return []
 
+        cached_count = sum(1 for e in candidates if not force_refresh and self._is_stats_cached(e.get("name", "")))
         logger.info(
-            "Fetching activity for %d candidates in both windows (all_count=%d, recent_count=%d).",
+            "Fetching activity for %d candidates (%d cached, %d to fetch) "
+            "in both windows (all_count=%d, recent_count=%d).",
             len(candidates),
+            cached_count,
+            len(candidates) - cached_count,
             len(all_window),
             len(recent_window),
         )
 
-        stats_tasks = [self._build_trader_stats(session, entry) for entry in candidates]
+        stats_tasks = [self._build_trader_stats(session, entry, force_refresh=force_refresh) for entry in candidates]
         all_stats_raw = await asyncio.gather(*stats_tasks, return_exceptions=True)
 
         all_stats: List[TraderStats] = []
@@ -363,6 +384,28 @@ class TrackerClient:
             )
 
         return self.top_traders
+
+    def _is_stats_cached(self, address: str) -> bool:
+        """Return True if address has a valid, non-expired cache entry."""
+        if not address or self.cfg.activity_cache_ttl_hours <= 0:
+            return False
+        entry = self._stats_cache.get(address)
+        if entry is None:
+            return False
+        _, fetched_at = entry
+        ttl_seconds = self.cfg.activity_cache_ttl_hours * 3600.0
+        return (time.time() - fetched_at) < ttl_seconds
+
+    def invalidate_stats_cache(self, address: Optional[str] = None) -> None:
+        """Remove a specific address (or all) from the stats cache.
+
+        Call this when a tracked trader is demoted or when an upstream event
+        suggests their stats may have changed materially (e.g. large loss).
+        """
+        if address is None:
+            self._stats_cache.clear()
+        else:
+            self._stats_cache.pop(address, None)
 
     @property
     def needs_rebalance(self) -> bool:
@@ -412,10 +455,14 @@ class TrackerClient:
         self,
         session: aiohttp.ClientSession,
         leaderboard_entry: dict,
+        force_refresh: bool = False,
     ) -> Optional[TraderStats]:
         """
         Fetch a trader's recent activity and compute TraderStats.
         Combines leaderboard aggregate data with per-trade detail from /activity.
+
+        Returns a cached result if the cache is valid and force_refresh is False,
+        avoiding redundant /activity API calls on the rebalance cycle.
         """
         address = leaderboard_entry.get("name", "")  # "name" = wallet address
         pseudonym = leaderboard_entry.get("pseudonym", "")
@@ -424,11 +471,17 @@ class TrackerClient:
         if not address:
             return None
 
+        # Return cached stats if available and not expired
+        if not force_refresh and self._is_stats_cached(address):
+            cached_stats, _ = self._stats_cache[address]
+            logger.debug("Stats cache hit for %s", address[:10])
+            return cached_stats
+
         trades = await self._fetch_activity(session, address)
 
         if not trades:
             trade_count = int(leaderboard_entry.get("tradesCount", 0))
-            return TraderStats(
+            stats = TraderStats(
                 address=address,
                 pseudonym=pseudonym,
                 total_pnl=total_pnl,
@@ -437,8 +490,13 @@ class TrackerClient:
                 pnl_per_trade=[],
                 last_trade_time=0.0,
             )
+        else:
+            stats = _compute_trader_stats(address, pseudonym, total_pnl, trades)
 
-        return _compute_trader_stats(address, pseudonym, total_pnl, trades)
+        if stats is not None and self.cfg.activity_cache_ttl_hours > 0:
+            self._stats_cache[address] = (stats, time.time())
+
+        return stats
 
     async def _fetch_activity(
         self,
