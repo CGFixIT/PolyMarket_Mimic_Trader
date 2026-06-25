@@ -348,6 +348,36 @@ class TestTickRounding:
         assert result == round(result, 10)
 
 
+class TestBookDepthUsdc:
+    """M2: book_depth_usdc sums ask-side USDC fillable within the slippage cap."""
+
+    @pytest.mark.asyncio
+    async def test_sums_asks_within_cap(self, paper_client):
+        paper_client.config.copy_trading.max_live_slippage_pct = 0.05  # 5% → max 0.525 at 0.50
+        paper_client.get_order_book = AsyncMock(
+            return_value={
+                "asks": [
+                    {"price": "0.50", "size": "100"},  # 0.50 <= 0.525 → 50 USDC
+                    {"price": "0.52", "size": "200"},  # 0.52 <= 0.525 → 104 USDC
+                    {"price": "0.60", "size": "999"},  # 0.60 > 0.525 → excluded
+                ]
+            }
+        )
+        depth = await paper_client.book_depth_usdc("tok", 0.50)
+        assert depth == pytest.approx(0.50 * 100 + 0.52 * 200)
+
+    @pytest.mark.asyncio
+    async def test_empty_book_is_zero(self, paper_client):
+        paper_client.get_order_book = AsyncMock(return_value={"asks": []})
+        assert await paper_client.book_depth_usdc("tok", 0.50) == 0.0
+
+    @pytest.mark.asyncio
+    async def test_all_asks_outside_cap_is_zero(self, paper_client):
+        paper_client.config.copy_trading.max_live_slippage_pct = 0.01
+        paper_client.get_order_book = AsyncMock(return_value={"asks": [{"price": "0.60", "size": "100"}]})
+        assert await paper_client.book_depth_usdc("tok", 0.50) == 0.0
+
+
 class TestExtractLiveFields:
     def test_extracts_variants(self):
         oid, filled, avg = _extract_live_fields({"orderID": "o1", "matched_amount": "40", "price": "0.51"})

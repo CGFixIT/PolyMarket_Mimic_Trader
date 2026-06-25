@@ -766,6 +766,55 @@ async def _closed_record(copier, position_id):
     return row[0], row[1], row[2]
 
 
+class TestCrowdingAndBookShare:
+    """M2: crowding discount sizes down stacked copies; book-share cap (live only)
+    bounds a copy to a fraction of resting ask depth."""
+
+    @pytest.mark.asyncio
+    async def test_crowding_discount_sizes_down_subsequent_copies(self, copier):
+        copier.config.copy_trading.crowding_discount = 0.5
+        # First copy: 100 * 0.5 size_multiplier = $50 → 100 shares @ 0.50.
+        await copier.handle_trade_event(buy_event(token="tok-a", wallet="0xwhale"))
+        # Second copy on the same token: prior=1 → 0.5**1 → $25 → 50 shares.
+        await copier.handle_trade_event(buy_event(token="tok-a", wallet="0xother"))
+        sizes = sorted(p.size_shares for p in await copier.portfolio.get_positions_by_token("tok-a"))
+        assert sizes == [pytest.approx(50.0), pytest.approx(100.0)]
+
+    @pytest.mark.asyncio
+    async def test_crowding_discount_default_is_noop(self, copier):
+        # Default crowding_discount=1.0 → both copies full size (unchanged behaviour).
+        await copier.handle_trade_event(buy_event(token="tok-a", wallet="0xwhale"))
+        await copier.handle_trade_event(buy_event(token="tok-a", wallet="0xother"))
+        sizes = sorted(p.size_shares for p in await copier.portfolio.get_positions_by_token("tok-a"))
+        assert sizes == [pytest.approx(100.0), pytest.approx(100.0)]
+
+    @pytest.mark.asyncio
+    async def test_book_share_cap_limits_size_in_live(self, copier):
+        copier.clob.paper_mode = False
+        copier.config.copy_trading.max_book_share_pct = 0.15
+        # 15% of $200 depth = $30 cap, below the $50 the formula would otherwise size.
+        copier.clob.book_depth_usdc = AsyncMock(return_value=200.0)
+        captured = {}
+
+        async def fake_place(order, *a, **k):
+            captured["order"] = order
+            return {"status": "LIVE", "filled_size": order.size_usdc / order.price, "avg_price": order.price}
+
+        copier.clob.place_order_with_timeout = AsyncMock(side_effect=fake_place)
+        await copier.handle_trade_event(buy_event(price=0.50, size=100.0, token="tok-live", market="mkt-live"))
+        assert captured["order"].size_usdc == pytest.approx(30.0)
+
+    @pytest.mark.asyncio
+    async def test_book_share_cap_skipped_in_paper(self, copier):
+        copier.config.copy_trading.max_book_share_pct = 0.15
+        # A tiny depth would cap hard IF applied — but paper must skip the book cap.
+        copier.clob.book_depth_usdc = AsyncMock(return_value=1.0)
+        await copier.handle_trade_event(buy_event(price=0.50, size=100.0, token="tok-a"))
+        positions = await copier.portfolio.get_open_positions()
+        assert positions[0].size_shares == pytest.approx(100.0)
+        copier.clob.book_depth_usdc.assert_not_called()
+
+
 class TestResolutionSettlement:
     """M14: a near-resolution SELL that can't fill is booked at its 0/1 outcome
     and the shares redeemed on-chain, instead of leaving stuck un-sellable dust."""

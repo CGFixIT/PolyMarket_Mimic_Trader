@@ -76,6 +76,16 @@ class CopyTradingConfig(BaseModel):
     # skips the sub-min check.
     order_price_tick: float = 0.01  # Polymarket cent-granularity tick
     order_min_shares: float = 1.0  # Minimum shares per order
+    # M2: crowding / book-share cap. Fixed-size copies are blind to book depth, so
+    # N bots stacking the same public whale into the same thin book compound
+    # slippage super-linearly. Two guards:
+    #  - max_book_share_pct: live-only ceiling — a copy never takes more than this
+    #    fraction of the ask-side depth fillable within the slippage cap. 0 disables.
+    #  - crowding_discount: each additional copy WE already hold on the token is
+    #    sized by discount**(prior copies). 1.0 disables (no discount); 0.5 halves
+    #    each successive copy. Applies in paper and live (models our own stacking).
+    max_book_share_pct: float = 0.15
+    crowding_discount: float = 1.0
     # Skip trades older than this at detection time — by then the source's alpha
     # has decayed and we'd only be buying into their price impact (adverse
     # selection). 0 disables the gate.

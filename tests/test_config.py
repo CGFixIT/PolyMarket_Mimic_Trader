@@ -137,6 +137,9 @@ class TestAppConfig:
         assert config.copy_trading.max_positions_per_token == 3  # M9
         assert config.risk_management.low_entry_threshold == 0.20  # L5
         assert config.risk_management.low_entry_tp_fraction == 0.25  # L5
+        # M2: crowding / book-share cap defaults
+        assert config.copy_trading.max_book_share_pct == 0.15
+        assert config.copy_trading.crowding_discount == 1.0
 
     def test_chunk4_execution_quality_fields(self):
         # Chunk 4 (H17/M1/M5) execution-quality knobs

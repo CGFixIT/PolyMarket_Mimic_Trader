@@ -449,6 +449,31 @@ class CopyTrader:
                 )
                 copy_size_usdc *= conviction_mult
 
+        # M2: crowding / book-share cap — two compounding-slippage guards.
+        #  (a) crowding discount: each additional copy WE already hold on this token
+        #      is sized down by crowding_discount**(prior copies), so repeatedly
+        #      stacking the same thin book doesn't self-inflict super-linear slippage.
+        #  (b) book-share cap (live only): never take more than max_book_share_pct of
+        #      the ask-side depth fillable within the slippage cap. Paper's synthetic
+        #      book isn't representative, so the cap is skipped there.
+        discount = ct.crowding_discount
+        if 0.0 < discount < 1.0:
+            prior_copies = len(self._pos_cache.get(event.token_id, []))
+            if prior_copies > 0:
+                copy_size_usdc *= discount**prior_copies
+        if not self.clob.paper_mode and ct.max_book_share_pct > 0 and current_price > 0:
+            depth_usdc = await self.clob.book_depth_usdc(event.token_id, current_price)
+            book_cap_usdc = ct.max_book_share_pct * depth_usdc
+            if copy_size_usdc > book_cap_usdc:
+                logger.debug(
+                    "M2 book-share cap: $%.0f -> $%.0f (%.0f%% of $%.0f depth)",
+                    copy_size_usdc,
+                    book_cap_usdc,
+                    ct.max_book_share_pct * 100,
+                    depth_usdc,
+                )
+                copy_size_usdc = book_cap_usdc
+
         # Hard ceiling regardless of sizing path.
         copy_size_usdc = min(copy_size_usdc, max_cap_usdc)
 

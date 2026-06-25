@@ -194,6 +194,27 @@ class ClobClient:
         # Float accumulation (e.g. 0.01*37) can leave sub-tick noise; quantize it out.
         return round(rounded, 10)
 
+    async def book_depth_usdc(self, token_id: str, price: float) -> float:
+        """M2: USDC notional of ask-side depth a BUY can consume within the slippage
+        cap of ``price`` — the resting depth available before the order breaches
+        max_live_slippage_pct. Used by the copier's book-share cap to size a copy as
+        a fraction of real depth instead of a fixed amount (which compounds slippage
+        when many bots stack the same whale).
+
+        Paper mode returns the synthetic book's depth; the copier only applies the
+        cap in live mode, so this is exercised for real against a live order book.
+        """
+        book = await self.get_order_book(token_id)
+        cap = self.config.copy_trading.max_live_slippage_pct
+        max_price = price * (1.0 + cap)
+        depth_usdc = 0.0
+        for level in book.get("asks", []):
+            level_price = float(level.get("price", 0))
+            level_size = float(level.get("size", 0))
+            if 0.0 < level_price <= max_price:
+                depth_usdc += level_price * level_size
+        return depth_usdc
+
     def _check_liquidity(self, book: dict, price: float, size_usdc: float) -> None:
         """Ensure the ASK side can fill a BUY at a volume-weighted average price within
         max_live_slippage_pct of the order price. A market BUY lifts asks, so the ask
