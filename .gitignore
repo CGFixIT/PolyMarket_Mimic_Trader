@@ -30,8 +30,9 @@ data/
 *.db-wal
 *.db-shm
 
-# Claude local worktrees & settings
-.claude/
+# Claude local worktrees (session-specific, not committed)
+.claude/worktrees/
+.claude/scheduled_tasks.lock
 
 # Testing
 .pytest_cache/

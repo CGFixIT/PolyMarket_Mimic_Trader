@@ -1,0 +1,15 @@
+{
+  "hooks": {
+    "Stop": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash -c 'cd \"$(git rev-parse --show-toplevel)\" && if ! git diff --quiet || ! git diff --cached --quiet || [ -n \"$(git ls-files --others --exclude-standard)\" ]; then echo \"There are uncommitted changes in the repository. Please commit and push these changes to the remote branch.\"; exit 1; fi'"
+          }
+        ]
+      }
+    ]
+  }
+}
