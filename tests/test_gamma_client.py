@@ -157,3 +157,59 @@ class TestParseMarket:
 
     def test_category_blank_when_absent(self):
         assert _parse_market({"condition_id": "c1"}).category == ""
+
+
+class TestMarketTTLCache:
+    """M5: get_market caches results and avoids redundant network calls."""
+
+    @pytest.mark.asyncio
+    async def test_cache_hit_skips_second_fetch(self, gamma_client):
+        mock_data = {"condition_id": "c1", "question": "Q?"}
+        get_mock = AsyncMock(return_value=mock_data)
+        with patch.object(gamma_client, "_get", get_mock):
+            first = await gamma_client.get_market("c1")
+            second = await gamma_client.get_market("c1")
+        assert first is second  # same cached object
+        assert get_mock.call_count == 1  # only one network call
+
+    @pytest.mark.asyncio
+    async def test_expired_cache_refetches(self, gamma_client):
+        import time as _time
+
+        mock_data = {"condition_id": "c1", "question": "Q?"}
+        get_mock = AsyncMock(return_value=mock_data)
+        with patch.object(gamma_client, "_get", get_mock):
+            await gamma_client.get_market("c1")
+            # Manually expire the cache entry.
+            gamma_client._market_cache["c1"] = (
+                _time.monotonic() - 400,  # 400s ago > 300s TTL
+                gamma_client._market_cache["c1"][1],
+            )
+            await gamma_client.get_market("c1")
+        assert get_mock.call_count == 2
+
+    @pytest.mark.asyncio
+    async def test_different_condition_ids_cached_independently(self, gamma_client):
+        async def _fake_get(path, **_):
+            cid = path.split("/")[-1]
+            return {"condition_id": cid, "question": "Q?"}
+
+        get_mock = AsyncMock(side_effect=_fake_get)
+        with patch.object(gamma_client, "_get", get_mock):
+            m1 = await gamma_client.get_market("c1")
+            m2 = await gamma_client.get_market("c2")
+            _ = await gamma_client.get_market("c1")  # cache hit for c1
+        assert get_mock.call_count == 2
+        assert m1.condition_id == "c1"
+        assert m2.condition_id == "c2"
+
+    @pytest.mark.asyncio
+    async def test_error_does_not_populate_cache(self, gamma_client):
+        get_mock = AsyncMock(side_effect=Exception("timeout"))
+        with patch.object(gamma_client, "_get", get_mock):
+            result1 = await gamma_client.get_market("c1")
+            result2 = await gamma_client.get_market("c1")
+        assert result1 is None
+        assert result2 is None
+        # Both calls hit the network; no stale None cached.
+        assert get_mock.call_count == 2

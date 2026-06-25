@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 from datetime import datetime, timezone
 from typing import Any, Optional
 
@@ -24,6 +25,11 @@ CLOB_API_BASE = "https://clob.polymarket.com"
 _CONN_LIMIT = 20
 _KEEPALIVE_TIMEOUT = 30
 
+# M5: market metadata doesn't change mid-event — condition_id, tokens, resolve_time
+# are stable once a market is active. Cache for 5 minutes to avoid re-fetching on
+# every incoming trade event (a busy wallet can fire dozens of events per minute).
+_MARKET_CACHE_TTL_SECONDS = 300
+
 
 class GammaClient:
     """Wraps the Polymarket Gamma API for market and event discovery."""
@@ -37,6 +43,9 @@ class GammaClient:
         # can both observe `_session is None` and each build a ClientSession —
         # one is orphaned and never closed ("Unclosed client session" + fd leak).
         self._session_lock = asyncio.Lock()
+        # M5: TTL cache for market metadata. Keyed by condition_id; value is
+        # (fetched_at_monotonic, Market). Entries expire after _MARKET_CACHE_TTL_SECONDS.
+        self._market_cache: dict[str, tuple[float, Market]] = {}
 
     async def _get_session(self) -> aiohttp.ClientSession:
         """Return the shared aiohttp session, lazily creating it under a lock to avoid orphaned sessions."""
@@ -73,11 +82,17 @@ class GammaClient:
         return [_parse_market(raw) for raw in raw_list]
 
     async def get_market(self, condition_id: str) -> Optional[Market]:
-        """Fetch a single market by condition ID or slug."""
+        """Fetch a single market by condition ID or slug (M5: TTL-cached for 5 min)."""
+        now = time.monotonic()
+        cached = self._market_cache.get(condition_id)
+        if cached is not None and (now - cached[0]) < _MARKET_CACHE_TTL_SECONDS:
+            return cached[1]
         try:
             data = await self._get(f"/markets/{condition_id}")
             if isinstance(data, dict):
-                return _parse_market(data)
+                market = _parse_market(data)
+                self._market_cache[condition_id] = (now, market)
+                return market
         except Exception:
             logger.warning("Failed to fetch market %s", condition_id)
         return None
