@@ -134,6 +134,7 @@ class RiskConfig:
     max_market_exposure_pct: float = 0.08  # Max 8% of bankroll in any one market
     max_trader_allocation: float = 0.05  # Max 5% of bankroll copied from any one trader
     max_total_exposure_pct: float = 0.30  # H4: Max 30% of bankroll deployed at once
+    max_event_exposure_pct: float = 0.12  # M7: Max 12% across markets of one parent event
 
     # --- Post-loss cooldown ---
     cooldown_after_losses: int = 3  # Pause entries after N consecutive losses
@@ -146,6 +147,15 @@ class RiskConfig:
     resolution_blackout_hours: float = 24.0
     resolution_hard_blackout_hours: float = 6.0
     resolution_soft_blackout_price_threshold: float = 0.85
+
+    # --- M6: regime/volatility-adaptive TP/SL ---
+    # Opt-in. When disabled (or a category has no entry) both multipliers resolve
+    # to 1.0 and _compute_thresholds() is byte-for-byte identical to before. When
+    # enabled, the looked-up multiplier scales the per-range TP/SL fraction for
+    # that market's category (e.g. widen crypto, tighten politics).
+    vol_adaptive_enabled: bool = False
+    vol_tp_mult_by_category: Dict[str, float] = field(default_factory=dict)
+    vol_sl_mult_by_category: Dict[str, float] = field(default_factory=dict)
 
 
 # ─── Position ─────────────────────────────────────────────────────────────────
@@ -172,6 +182,7 @@ class Position:
     sl_price: Optional[float] = None
     peak_price: Optional[float] = None  # Tracks highest price since entry
     resolve_time: Optional[float] = None  # Unix timestamp of market resolution
+    event_id: str = ""  # M7: parent-event bucket for correlated-exposure accounting
 
     def __post_init__(self):
         if self.tp_price is None:
@@ -223,6 +234,8 @@ class RiskManager:
         self._market_exposure: Dict[str, Decimal] = {}
         # trader_address → total $ value currently copied from that trader
         self._trader_exposure: Dict[str, Decimal] = {}
+        # M7: event_id → total $ value across all markets of that parent event
+        self._event_exposure: Dict[str, Decimal] = {}
         self._exposure_lock = asyncio.Lock()
         # Post-loss cooldown state
         self._consecutive_losses: int = 0
@@ -239,10 +252,15 @@ class RiskManager:
         entry_price: float,
         size_shares: float,
         resolve_time: Optional[float] = None,
+        event_id: str = "",
+        category: str = "",
     ) -> Position:
         """
         Validate price, compute range-relative TP/SL, check exposure cap,
         and return a fully initialised Position.
+
+        ``event_id`` buckets correlated markets for the M7 event cap; ``category``
+        selects the M6 vol-adaptive TP/SL multiplier. Both default to "" (no-op).
 
         Raises:
             InvalidPriceError   — if entry_price ∉ [0.0, 1.0]
@@ -250,7 +268,7 @@ class RiskManager:
         """
         _assert_valid_price(entry_price, "entry_price")
 
-        tp, sl = self._compute_thresholds(entry_price)
+        tp, sl = self._compute_thresholds(entry_price, category=category)
         if tp <= sl:
             raise InvalidPriceError(f"Degenerate thresholds at entry={entry_price}: tp={tp} <= sl={sl}")
 
@@ -261,6 +279,7 @@ class RiskManager:
             self._assert_exposure_cap(market_id, position_value)
             self._assert_trader_allocation(trader_address, position_value)
             self._assert_total_exposure(position_value)
+            self._assert_event_exposure(event_id, position_value)
 
             pos = Position(
                 position_id=position_id,
@@ -274,10 +293,13 @@ class RiskManager:
                 sl_price=sl,
                 peak_price=entry_price,
                 resolve_time=resolve_time,
+                event_id=event_id,
             )
 
             self._market_exposure[market_id] = self._market_exposure.get(market_id, _ZERO) + position_value_d
             self._trader_exposure[trader_address] = self._trader_exposure.get(trader_address, _ZERO) + position_value_d
+            if event_id:
+                self._event_exposure[event_id] = self._event_exposure.get(event_id, _ZERO) + position_value_d
 
         logger.info(
             "build_position | id=%-20s mkt=%s entry=%.4f TP=%.4f SL=%.4f "
@@ -443,6 +465,11 @@ class RiskManager:
                 _ZERO,
                 self._trader_exposure.get(pos.trader_address, _ZERO) - released_d,
             )
+            if pos.event_id:
+                self._event_exposure[pos.event_id] = max(
+                    _ZERO,
+                    self._event_exposure.get(pos.event_id, _ZERO) - released_d,
+                )
 
         self._update_cooldown(pnl, reason)
 
@@ -507,14 +534,20 @@ class RiskManager:
         """Current $ allocated in a given market."""
         return float(self._market_exposure.get(market_id, _ZERO))
 
-    async def release_exposure(self, market_id: str, value: float, trader_address: Optional[str] = None) -> None:
+    async def release_exposure(
+        self,
+        market_id: str,
+        value: float,
+        trader_address: Optional[str] = None,
+        event_id: str = "",
+    ) -> None:
         """Release exposure registered by build_position() for a position that was
         never actually opened (e.g. order placement failed). Unlike record_exit,
         this does NOT touch bankroll or daily PnL — no trade occurred.
 
-        Pass ``trader_address`` to also release the per-trader allocation that
-        build_position() reserved; otherwise it would leak and slowly choke off
-        future copies from that trader."""
+        Pass ``trader_address`` to also release the per-trader allocation and
+        ``event_id`` to release the M7 event bucket that build_position()
+        reserved; otherwise they would leak and slowly choke off future copies."""
         value_d = _to_dec(value)
         async with self._exposure_lock:
             self._market_exposure[market_id] = max(_ZERO, self._market_exposure.get(market_id, _ZERO) - value_d)
@@ -522,8 +555,10 @@ class RiskManager:
                 self._trader_exposure[trader_address] = max(
                     _ZERO, self._trader_exposure.get(trader_address, _ZERO) - value_d
                 )
+            if event_id:
+                self._event_exposure[event_id] = max(_ZERO, self._event_exposure.get(event_id, _ZERO) - value_d)
 
-    def rehydrate_exposure(self, market_id: str, trader_address: str, value: float) -> None:
+    def rehydrate_exposure(self, market_id: str, trader_address: str, value: float, event_id: str = "") -> None:
         """Restore exposure for an ALREADY-OPEN position on restart (e.g. when
         replaying open positions from the portfolio DB).
 
@@ -536,6 +571,8 @@ class RiskManager:
         value_d = _to_dec(value)
         self._market_exposure[market_id] = self._market_exposure.get(market_id, _ZERO) + value_d
         self._trader_exposure[trader_address] = self._trader_exposure.get(trader_address, _ZERO) + value_d
+        if event_id:
+            self._event_exposure[event_id] = self._event_exposure.get(event_id, _ZERO) + value_d
 
         mkt_exp_f = float(self._market_exposure[market_id])
         market_cap = self.market_exposure_cap()
@@ -575,6 +612,10 @@ class RiskManager:
         """Per-trader allocation cap in $ terms (changes as bankroll changes)."""
         return self.bankroll * self.cfg.max_trader_allocation
 
+    def event_exposure(self, event_id: str) -> float:
+        """M7: current $ deployed across all markets sharing this parent event."""
+        return float(self._event_exposure.get(event_id, _ZERO))
+
     def daily_pnl(self) -> float:
         """Return the realized PnL accumulated in the current UTC daily-loss window."""
         return float(self._daily_pnl)
@@ -593,7 +634,25 @@ class RiskManager:
 
     # ── Internal threshold computation ────────────────────────────────────────
 
-    def _compute_thresholds(self, entry: float) -> Tuple[float, float]:
+    def _vol_multipliers(self, category: str) -> Tuple[float, float]:
+        """M6: return (tp_mult, sl_mult) for a market category.
+
+        No-op (1.0, 1.0) unless vol_adaptive_enabled is set; then the category is
+        looked up (case-insensitive) in the configured maps, defaulting to 1.0 for
+        any category not listed. Non-positive multipliers are ignored as a guard.
+        """
+        if not self.cfg.vol_adaptive_enabled or not category:
+            return 1.0, 1.0
+        key = category.strip().lower()
+        tp_mult = self.cfg.vol_tp_mult_by_category.get(key, 1.0)
+        sl_mult = self.cfg.vol_sl_mult_by_category.get(key, 1.0)
+        if tp_mult <= 0:
+            tp_mult = 1.0
+        if sl_mult <= 0:
+            sl_mult = 1.0
+        return tp_mult, sl_mult
+
+    def _compute_thresholds(self, entry: float, category: str = "") -> Tuple[float, float]:
         """
         Range-relative TP and SL with absolute minimum guards.
 
@@ -603,6 +662,10 @@ class RiskManager:
         Near-boundary entries get adaptive minimums so TP/SL remain meaningful:
           entry < 0.02 → min_sl at least 50% of entry (prevents SL clamping to 0)
           entry > 0.98 → min_tp at least 50% of remaining upside
+
+        M6: ``category`` selects a per-regime width multiplier for the TP/SL range
+        fractions. When vol_adaptive is disabled or the category is unknown the
+        multipliers are 1.0 and the result is identical to the pre-M6 behaviour.
         """
         dist_ceil = 1.0 - entry  # remaining upside
         dist_floor = entry  # remaining downside
@@ -627,8 +690,15 @@ class RiskManager:
             t = entry / threshold  # 0 at floor, 1 at threshold
             tp_fraction = low_frac + (self.cfg.tp_range_fraction - low_frac) * t
 
+        # M6: scale the range fractions by the market's regime multiplier. Defaults
+        # to 1.0 (no change) unless vol_adaptive_enabled and the category is mapped.
+        sl_fraction = self.cfg.sl_range_fraction
+        tp_mult, sl_mult = self._vol_multipliers(category)
+        tp_fraction *= tp_mult
+        sl_fraction *= sl_mult
+
         tp_raw = entry + max(dist_ceil * tp_fraction, min_tp)
-        sl_raw = entry - max(dist_floor * self.cfg.sl_range_fraction, min_sl)
+        sl_raw = entry - max(dist_floor * sl_fraction, min_sl)
 
         # H2: enforce minimum reward-risk ratio by capping the SL distance.
         # At high entries (e.g. 0.95) the 25%-of-downside SL dominates the tiny
@@ -695,6 +765,24 @@ class RiskManager:
                 f"Total exposure ${total:.2f} would exceed "
                 f"{self.cfg.max_total_exposure_pct * 100:.0f}% cap "
                 f"(${cap:.2f} of ${self.bankroll:.2f})"
+            )
+
+    def _assert_event_exposure(self, event_id: str, new_value: float) -> None:
+        """Raise ExposureCapError if adding new_value would breach the per-event cap.
+
+        M7: markets sharing one parent event are a single correlated bet. A blank
+        event_id (API omitted the grouping) is a no-op — those positions fall back
+        to per-market accounting only.
+        """
+        if not event_id:
+            return
+        cap = self.bankroll * self.cfg.max_event_exposure_pct
+        current = float(self._event_exposure.get(event_id, _ZERO))
+        if current + new_value > cap:
+            raise ExposureCapError(
+                f"Event {event_id}: existing=${current:.2f} + new=${new_value:.2f} "
+                f"= ${current + new_value:.2f} > cap=${cap:.2f} "
+                f"({self.cfg.max_event_exposure_pct * 100:.0f}% of ${self.bankroll:.2f})"
             )
 
     def _assert_trader_allocation(self, trader_address: str, new_value: float) -> None:

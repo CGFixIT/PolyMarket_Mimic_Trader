@@ -69,6 +69,10 @@ async def run_bot(config_path: Optional[str] = None, mode: Optional[str] = None)
         resolution_hard_blackout_hours=config.risk_management.resolution_hard_blackout_hours,
         resolution_soft_blackout_price_threshold=config.risk_management.resolution_soft_blackout_price_threshold,
         max_total_exposure_pct=config.risk_management.max_total_exposure_pct,
+        max_event_exposure_pct=config.risk_management.max_event_exposure_pct,
+        vol_adaptive_enabled=config.risk_management.vol_adaptive_enabled,
+        vol_tp_mult_by_category=config.risk_management.vol_tp_mult_by_category,
+        vol_sl_mult_by_category=config.risk_management.vol_sl_mult_by_category,
     )
     risk_manager = RiskManager(config=risk_cfg, bankroll=config.bankroll)
 

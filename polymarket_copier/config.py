@@ -218,6 +218,18 @@ class RiskManagementConfig(BaseModel):
     fail_closed_on_missing_data: bool = True
     # H4: Maximum fraction of bankroll deployed across all open positions at once.
     max_total_exposure_pct: float = 0.30
+    # M7: Maximum fraction of bankroll across all markets sharing one parent event.
+    # Multiple outcome markets of a single event (e.g. an election) are one
+    # correlated bet; capping aggregate event exposure prevents a single real-world
+    # outcome from sinking more than this. No-op when markets carry no event_id.
+    max_event_exposure_pct: float = 0.12
+    # M6: regime/volatility-adaptive TP/SL widths. Opt-in: when both multiplier
+    # maps are empty (the default) every category resolves to 1.0x and TP/SL are
+    # computed exactly as before. Populate by lowercased category to widen/tighten
+    # the range fractions per regime (e.g. gappy crypto wider, slow politics tighter).
+    vol_adaptive_enabled: bool = False
+    vol_tp_mult_by_category: dict[str, float] = Field(default_factory=dict)
+    vol_sl_mult_by_category: dict[str, float] = Field(default_factory=dict)
     # H10: WebSocket reconnect backoff cap and fast exit-poll interval.
     # Cap ensures WS reconnects are attempted at least every 30s (not 80s+).
     ws_max_backoff_seconds: float = 30.0

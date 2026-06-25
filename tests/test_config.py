@@ -31,6 +31,12 @@ class TestAppConfig:
         assert config.copy_trading.conviction_sizing_enabled is False
         assert config.copy_trading.max_conviction_mult == 2.0
         assert config.copy_trading.min_conviction_mult == 0.5
+        # M7: event-level correlation cap.
+        assert config.risk_management.max_event_exposure_pct == 0.12
+        # M6: regime/vol-adaptive TP/SL — opt-in, empty maps by default.
+        assert config.risk_management.vol_adaptive_enabled is False
+        assert config.risk_management.vol_tp_mult_by_category == {}
+        assert config.risk_management.vol_sl_mult_by_category == {}
 
     def test_custom_values(self):
         config = AppConfig(

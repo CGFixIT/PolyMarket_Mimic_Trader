@@ -156,4 +156,49 @@ def _parse_market(raw: dict) -> Market:
         resolve_time=_parse_resolve_time(raw),
         volume_24h=float(raw.get("volume24hr", raw.get("volume_24h", 0)) or 0),
         active=bool(raw.get("active", True)),
+        event_id=_parse_event_id(raw),
+        category=_parse_category(raw),
     )
+
+
+def _parse_event_id(raw: dict) -> str:
+    """Extract the parent-event identifier so correlated markets share an exposure bucket.
+
+    Gamma nests markets under an ``events`` array; older/flatter payloads expose
+    ``eventSlug``/``event_id`` directly. We prefer the first event's stable slug
+    or id. Returns "" when no event grouping is present (cap then no-ops).
+    """
+    events = raw.get("events")
+    if isinstance(events, list) and events:
+        ev = events[0]
+        if isinstance(ev, dict):
+            for key in ("id", "slug", "ticker"):
+                val = ev.get(key)
+                if val:
+                    return str(val)
+    for key in ("event_id", "eventId", "eventSlug", "event_slug"):
+        val = raw.get(key)
+        if val:
+            return str(val)
+    return ""
+
+
+def _parse_category(raw: dict) -> str:
+    """Extract a coarse, lowercased market category for regime-aware TP/SL widths.
+
+    Tries an explicit ``category`` field, then the first tag's label/slug. Returns
+    "" when nothing usable is present so the vol multiplier defaults to 1.0x.
+    """
+    cat = raw.get("category")
+    if cat:
+        return str(cat).strip().lower()
+    tags = raw.get("tags")
+    if isinstance(tags, list) and tags:
+        first = tags[0]
+        if isinstance(first, dict):
+            label = first.get("label") or first.get("slug") or first.get("name")
+            if label:
+                return str(label).strip().lower()
+        elif isinstance(first, str) and first:
+            return first.strip().lower()
+    return ""
