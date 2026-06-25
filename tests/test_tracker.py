@@ -840,3 +840,91 @@ class TestMarketsTracked:
         ]
         stats = _compute_trader_stats("0xabc", "Name", 50000, activity)
         assert stats.markets == frozenset({"m1", "m2"})
+
+
+class TestWashTradeGuard:
+    """M11: self-cross (maker == taker) activity records are excluded from scoring."""
+
+    def _make_activity(self, buy_maker="0xwhale", buy_taker="0xother", sell_maker="0xother", sell_taker="0xwhale"):
+        return [
+            {
+                "type": "trade",
+                "side": "BUY",
+                "market": "m1",
+                "asset": "tok1",
+                "price": 0.50,
+                "size": 100,
+                "timestamp": 1_700_000_000,
+                "maker": buy_maker,
+                "taker": buy_taker,
+            },
+            {
+                "type": "trade",
+                "side": "SELL",
+                "market": "m1",
+                "asset": "tok1",
+                "price": 0.60,
+                "size": 100,
+                "timestamp": 1_700_001_000,
+                "maker": sell_maker,
+                "taker": sell_taker,
+            },
+        ]
+
+    def test_normal_trade_included(self):
+        activity = self._make_activity()
+        stats = _compute_trader_stats("0xwhale", "W", 10000, activity)
+        assert stats.trade_count == 1  # one completed round-trip
+        assert stats.win_rate == 1.0
+
+    def test_self_cross_buy_excluded(self):
+        # BUY is a self-cross → no open position → SELL finds no match → no scored trades
+        activity = self._make_activity(buy_maker="0xwhale", buy_taker="0xwhale")
+        stats = _compute_trader_stats("0xwhale", "W", 10000, activity)
+        assert stats.pnl_per_trade == []  # no completed round-trips scored
+
+    def test_self_cross_sell_excluded(self):
+        # Normal BUY opens; self-cross SELL is skipped → open buy imputed as loss
+        activity = self._make_activity(sell_maker="0xwhale", sell_taker="0xwhale")
+        stats = _compute_trader_stats("0xwhale", "W", 10000, activity, impute_loss_after_days=0.0001)
+        # BUY was normal, SELL self-cross skipped; old open buy imputed as -100% loss
+        assert len(stats.pnl_per_trade) == 1
+        assert stats.win_rate == 0.0
+
+    def test_both_self_cross_excluded(self):
+        activity = self._make_activity(
+            buy_maker="0xwhale", buy_taker="0xwhale", sell_maker="0xwhale", sell_taker="0xwhale"
+        )
+        stats = _compute_trader_stats("0xwhale", "W", 10000, activity)
+        assert stats.pnl_per_trade == []
+
+    def test_missing_maker_taker_not_filtered(self):
+        # Records without maker/taker fields (older API responses) should not be filtered.
+        activity = [
+            {
+                "type": "trade",
+                "side": "BUY",
+                "market": "m1",
+                "asset": "tok1",
+                "price": 0.50,
+                "size": 100,
+                "timestamp": 1_700_000_000,
+            },
+            {
+                "type": "trade",
+                "side": "SELL",
+                "market": "m1",
+                "asset": "tok1",
+                "price": 0.60,
+                "size": 100,
+                "timestamp": 1_700_001_000,
+            },
+        ]
+        stats = _compute_trader_stats("0xwhale", "W", 10000, activity)
+        assert stats.trade_count == 1
+
+    def test_case_insensitive_address_comparison(self):
+        # Same address differing only in case should still be caught as self-cross.
+        activity = self._make_activity(buy_maker="0xWHALE", buy_taker="0xwhale")
+        stats = _compute_trader_stats("0xwhale", "W", 10000, activity)
+        assert stats.pnl_per_trade == []

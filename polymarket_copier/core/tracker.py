@@ -604,6 +604,14 @@ def _compute_trader_stats(
         if item_type not in ("trade", "buy", "sell") and not is_redeem:
             continue
 
+        # M11: wash-trade / self-cross guard. Skip records where maker and taker
+        # are the same address — self-crossing inflates win-rate with risk-free
+        # round-trips that a copy bot can never replicate.
+        maker = str(item.get("maker", item.get("makerAddress", ""))).lower()
+        taker = str(item.get("taker", item.get("takerAddress", ""))).lower()
+        if maker and taker and maker == taker:
+            continue
+
         market_id = str(item.get("market", item.get("conditionId", "")))
         token_id = str(item.get("asset", item.get("tokenId", "")))
         side = str(item.get("side", "")).upper()
