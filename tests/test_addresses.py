@@ -2,9 +2,7 @@
 
 from __future__ import annotations
 
-from unittest.mock import AsyncMock, MagicMock, patch
-
-import pytest
+from unittest.mock import MagicMock
 
 from polymarket_copier.core.copier import CopyTrader
 from polymarket_copier.utils.addresses import normalize_address
