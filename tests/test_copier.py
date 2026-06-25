@@ -755,6 +755,130 @@ class TestFillReconciliation:
         assert positions[0].size_shares == pytest.approx(75.0)
 
 
+async def _closed_record(copier, position_id):
+    """Read (exit_price, exit_reason, realized_pnl) for a closed position row."""
+    db = copier.portfolio._require_db()
+    cursor = await db.execute(
+        "SELECT exit_price, exit_reason, realized_pnl FROM positions WHERE position_id=?",
+        (position_id,),
+    )
+    row = await cursor.fetchone()
+    return row[0], row[1], row[2]
+
+
+class TestResolutionSettlement:
+    """M14: a near-resolution SELL that can't fill is booked at its 0/1 outcome
+    and the shares redeemed on-chain, instead of leaving stuck un-sellable dust."""
+
+    async def _open_position(self, copier, *, entry=0.50, shares=100.0, resolve_in_hours=1.0):
+        """Open a position directly (bypassing the entry blackout gate) with a
+        resolve_time `resolve_in_hours` from now, and return it."""
+        resolve_ts = time.time() + resolve_in_hours * 3600.0
+        pos = await copier.risk.build_position(
+            position_id="pos-settle",
+            market_id="mkt-s",
+            token_id="tok-s",
+            trader_address="0xwhale",
+            entry_price=entry,
+            size_shares=shares,
+            resolve_time=resolve_ts,
+        )
+        await copier.portfolio.open_position(pos)
+        return pos
+
+    @pytest.mark.asyncio
+    async def test_winning_side_settles_at_one(self, copier):
+        from polymarket_copier.core.risk_manager import ExitReason
+
+        pos = await self._open_position(copier, entry=0.50, shares=100.0, resolve_in_hours=1.0)
+        copier.clob.place_order_with_timeout = AsyncMock(return_value={"status": "LIVE", "filled_size": 0.0})
+        copier.clob.redeem_position = AsyncMock(return_value=True)
+
+        # Price extreme high (>= 0.90 threshold) → held token wins → settle at 1.0.
+        await copier._exit_position_locked(pos, 0.95, ExitReason.MARKET_RESOLVING)
+
+        assert await copier.portfolio.position_count() == 0
+        copier.clob.redeem_position.assert_awaited_once()
+        exit_price, exit_reason, pnl = await _closed_record(copier, "pos-settle")
+        assert exit_price == pytest.approx(1.0)
+        assert exit_reason == "MARKET_SETTLED"
+        # PnL = (1.0 - 0.50) * 100 = +50.
+        assert pnl == pytest.approx(50.0)
+
+    @pytest.mark.asyncio
+    async def test_losing_side_settles_at_zero(self, copier):
+        from polymarket_copier.core.risk_manager import ExitReason
+
+        pos = await self._open_position(copier, entry=0.50, shares=100.0, resolve_in_hours=1.0)
+        copier.clob.place_order_with_timeout = AsyncMock(return_value={"status": "LIVE", "filled_size": 0.0})
+        copier.clob.redeem_position = AsyncMock(return_value=True)
+
+        # Price extreme low (<= 0.10) → held token loses → settle at 0.0.
+        await copier._exit_position_locked(pos, 0.05, ExitReason.MARKET_RESOLVING)
+
+        assert await copier.portfolio.position_count() == 0
+        exit_price, exit_reason, pnl = await _closed_record(copier, "pos-settle")
+        assert exit_price == pytest.approx(0.0)
+        assert exit_reason == "MARKET_SETTLED"
+        # PnL = (0.0 - 0.50) * 100 = -50.
+        assert pnl == pytest.approx(-50.0)
+
+    @pytest.mark.asyncio
+    async def test_ambiguous_midprice_leaves_position_open(self, copier):
+        from polymarket_copier.core.risk_manager import ExitReason
+
+        pos = await self._open_position(copier, resolve_in_hours=1.0)
+        copier.clob.place_order_with_timeout = AsyncMock(return_value={"status": "LIVE", "filled_size": 0.0})
+        copier.clob.redeem_position = AsyncMock(return_value=True)
+
+        # 0.50 is not extreme enough to call the outcome → no settlement.
+        await copier._exit_position_locked(pos, 0.50, ExitReason.MARKET_RESOLVING)
+
+        assert await copier.portfolio.position_count() == 1  # still open
+        copier.clob.redeem_position.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_not_near_resolution_leaves_position_open(self, copier):
+        from polymarket_copier.core.risk_manager import ExitReason
+
+        # 100h out — well outside the 24h blackout. A failed fill is just thin
+        # liquidity, not a resolution lockout → don't fabricate a settlement.
+        pos = await self._open_position(copier, resolve_in_hours=100.0)
+        copier.clob.place_order_with_timeout = AsyncMock(return_value={"status": "LIVE", "filled_size": 0.0})
+        copier.clob.redeem_position = AsyncMock(return_value=True)
+
+        await copier._exit_position_locked(pos, 0.95, ExitReason.MARKET_RESOLVING)
+
+        assert await copier.portfolio.position_count() == 1
+        copier.clob.redeem_position.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_settlement_disabled_leaves_position_open(self, copier):
+        from polymarket_copier.core.risk_manager import ExitReason
+
+        copier.config.risk_management.settlement_enabled = False
+        pos = await self._open_position(copier, resolve_in_hours=1.0)
+        copier.clob.place_order_with_timeout = AsyncMock(return_value={"status": "LIVE", "filled_size": 0.0})
+        copier.clob.redeem_position = AsyncMock(return_value=True)
+
+        await copier._exit_position_locked(pos, 0.95, ExitReason.MARKET_RESOLVING)
+
+        assert await copier.portfolio.position_count() == 1
+        copier.clob.redeem_position.assert_not_called()
+
+    def test_settlement_value_thresholds(self, copier):
+        from types import SimpleNamespace
+
+        near = SimpleNamespace(resolve_time=time.time() + 3600.0)  # 1h out, in blackout
+        assert copier._settlement_value(near, 0.90) == 1.0  # at threshold
+        assert copier._settlement_value(near, 0.99) == 1.0
+        assert copier._settlement_value(near, 0.09) == 0.0  # below 1 - threshold
+        assert copier._settlement_value(near, 0.01) == 0.0
+        assert copier._settlement_value(near, 0.50) is None  # ambiguous
+        # No resolve_time → never settles.
+        assert copier._settlement_value(SimpleNamespace(resolve_time=None), 0.95) is None
+
+
 # ─── Kelly tracker-prior seeding ─────────────────────────────────────────────
 
 

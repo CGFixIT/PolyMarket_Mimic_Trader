@@ -67,6 +67,7 @@ class ExitReason(Enum):
     TIME_EXIT = auto()
     DAILY_LOSS_LIMIT = auto()  # Portfolio circuit breaker
     MARKET_RESOLVING = auto()  # Within resolution blackout window
+    MARKET_SETTLED = auto()  # M14: near-resolution SELL couldn't fill; booked at 0/1 outcome
     EXPOSURE_CAP = auto()  # Market-level cap would be breached
     SOURCE_EXIT = auto()  # Tracked trader exited; we mirror their exit
 

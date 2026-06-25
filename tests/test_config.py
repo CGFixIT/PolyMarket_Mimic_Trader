@@ -22,6 +22,9 @@ class TestAppConfig:
         assert config.risk_management.min_sl_abs == 0.02
         assert config.risk_management.max_market_exposure_pct == 0.08
         assert config.risk_management.resolution_blackout_hours == 24.0
+        # M14: 0/1 settlement modeling defaults
+        assert config.risk_management.settlement_enabled is True
+        assert config.risk_management.settlement_price_threshold == 0.90
         assert config.copy_trading.size_multiplier == 0.5
         # L1: adaptive hot-polling defaults. M16: bounded tick-queue default.
         assert config.hot_poll_interval_seconds == 2.0

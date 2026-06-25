@@ -214,6 +214,13 @@ class RiskManagementConfig(BaseModel):
     # final-day window when the market still has genuine price discovery.
     resolution_hard_blackout_hours: float = 6.0
     resolution_soft_blackout_price_threshold: float = 0.85
+    # M14: 0/1 settlement modeling. When a near-resolution SELL can't fill (winning
+    # side has no buyer at ~1.0; losing side has no bid), book the position at its
+    # implied outcome instead of leaving it stuck open. settlement_price_threshold is
+    # how extreme the price must be to confidently call the outcome: >= threshold → 1.0,
+    # <= 1 - threshold → 0.0, otherwise too ambiguous to settle (leave open).
+    settlement_enabled: bool = True
+    settlement_price_threshold: float = 0.90
     drawdown_stop_pct: float = 0.08
     cooldown_after_losses: int = 3
     cooldown_minutes: int = 60

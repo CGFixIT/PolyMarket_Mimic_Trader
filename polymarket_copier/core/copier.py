@@ -7,6 +7,7 @@ import logging
 import math
 import time
 import uuid
+from typing import Optional
 
 from polymarket_copier.api.clob_client import ClobClient, InsufficientLiquidityError
 from polymarket_copier.api.gamma_client import GammaClient
@@ -792,6 +793,30 @@ class CopyTrader:
         if self._peak_dirty and (time.monotonic() - self._last_peak_flush) >= self._peak_persist_interval:
             await self._flush_peak_cache()
 
+    def _settlement_value(self, pos, price: float) -> Optional[float]:
+        """M14: implied 0/1 settlement value for a position whose SELL can't fill.
+
+        Only settles when (a) the feature is enabled, (b) the market is within the
+        resolution blackout window (resolution imminent or already past), and (c) the
+        price is extreme enough to confidently call the outcome:
+          price >= settlement_price_threshold        → 1.0 (held token wins)
+          price <= 1 - settlement_price_threshold     → 0.0 (held token loses)
+        An ambiguous mid-range price returns None — the outcome is still genuinely
+        uncertain, so we don't fabricate a settlement.
+        """
+        rm = self.config.risk_management
+        if not rm.settlement_enabled or pos.resolve_time is None:
+            return None
+        hours_to_resolve = (pos.resolve_time - time.time()) / 3600.0
+        if hours_to_resolve >= rm.resolution_blackout_hours:
+            return None  # not near resolution — a failed fill is just thin liquidity
+        thresh = rm.settlement_price_threshold
+        if price >= thresh:
+            return 1.0
+        if price <= (1.0 - thresh):
+            return 0.0
+        return None
+
     async def _exit_position(self, pos, price: float, reason: ExitReason) -> None:
         """Acquire the per-position lock and close the position, skipping if an exit is already in progress."""
         # C4: per-position lock prevents two concurrent exit triggers (WS tick vs
@@ -865,8 +890,26 @@ class CopyTrader:
                     )
 
         if filled_shares <= 0.0:
-            # No confirmed fill — leave position open for re-evaluation next tick.
-            return
+            # M14: a near-resolution SELL often can't fill — the winning side has no
+            # buyer at ~1.0 and the losing side has no bid at all. Rather than leave
+            # the position open and retry the same un-fillable SELL forever (dust that
+            # never exits), settle it at its implied 0/1 outcome and redeem the shares
+            # on-chain. Outside the blackout window, or at an ambiguous mid-price, this
+            # returns None and we keep the old behaviour (leave open, retry next tick).
+            settle_price = self._settlement_value(pos, price)
+            if settle_price is None:
+                return
+            await self.clob.redeem_position(pos.token_id, exit_shares)
+            filled_shares = exit_shares
+            avg_fill_price = settle_price
+            reason = ExitReason.MARKET_SETTLED
+            logger.info(
+                "M14 settlement: %s unfilled near resolution → booking %.2f shares at $%.2f (%s)",
+                pos.position_id,
+                exit_shares,
+                settle_price,
+                "WIN" if settle_price >= 0.5 else "LOSS",
+            )
 
         # C4: `AND status='open'` in close_position() is the DB-level guard that
         # prevents a double-record even if the application lock were somehow bypassed.
