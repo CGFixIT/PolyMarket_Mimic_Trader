@@ -444,7 +444,12 @@ class TrackerClient:
         try:
             async with session.get(url, params=params) as resp:
                 if resp.status != 200:
-                    logger.warning("Leaderboard fetch (window=%s) returned HTTP %d", window, resp.status)
+                    logger.warning(
+                        "Leaderboard fetch (window=%s) returned HTTP %d %s",
+                        window,
+                        resp.status,
+                        resp.reason,
+                    )
                     return []
                 data = await resp.json()
                 # Pre-filter by minimum PnL before paying for per-trader API calls
@@ -515,7 +520,12 @@ class TrackerClient:
         try:
             async with session.get(url, params=params) as resp:
                 if resp.status != 200:
-                    logger.warning("Activity fetch for %s returned HTTP %d", address[:10], resp.status)
+                    logger.warning(
+                        "Activity fetch for %s returned HTTP %d %s",
+                        address[:10],
+                        resp.status,
+                        resp.reason,
+                    )
                     return []
                 return await resp.json()
         except Exception as exc:

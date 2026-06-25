@@ -471,7 +471,12 @@ class TradeMonitor:
         async with self._rate_limiter:
             async with session.get(url, params=params) as resp:
                 if resp.status != 200:
-                    logger.warning("Data API returned %d for wallet %s", resp.status, wallet[:10])
+                    logger.warning(
+                        "Data API returned %d %s for wallet %s",
+                        resp.status,
+                        resp.reason,
+                        wallet[:10],
+                    )
                     return
 
                 activity: List[dict] = await resp.json()

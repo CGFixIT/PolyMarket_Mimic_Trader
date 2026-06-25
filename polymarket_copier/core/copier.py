@@ -99,14 +99,18 @@ class CopyTrader:
         self._tracker_mean_pnl = {normalize_address(k): v for k, v in rois.items()}
         self._tracker_updated_at = time.time()  # M4: stamp for prior-decay
 
-    async def rehydrate_position_cache(self) -> None:
+    async def rehydrate_position_cache(self, open_positions: list[Position] | None = None) -> None:
         """Load all open DB positions into the in-memory cache (H11).
 
         Must be called once at startup after portfolio.init(), before monitor.run().
         On a clean first start this is a no-op.  On restart it restores the
         position set so handle_price_tick() has a warm cache immediately.
+
+        Pass *open_positions* when the caller already holds the result of
+        ``portfolio.get_open_positions()`` to avoid a second DB round-trip.
         """
-        open_positions = await self.portfolio.get_open_positions()
+        if open_positions is None:
+            open_positions = await self.portfolio.get_open_positions()
         self._pos_cache.clear()
         for p in open_positions:
             self._pos_cache.setdefault(p.token_id, []).append(p)

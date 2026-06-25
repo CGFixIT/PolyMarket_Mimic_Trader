@@ -1044,3 +1044,99 @@ class TestSkipReasons:
         finally:
             cleanup()
         assert any(s["reason"] == "missing_market_data" for s in self._skips(records))
+
+
+class TestRehydratePositionCache:
+    """rehydrate_position_cache() can accept a pre-fetched list to avoid a
+    redundant DB round-trip at startup."""
+
+    @pytest.mark.asyncio
+    async def test_rehydrate_with_prefetched_positions_skips_db(self, copier):
+        """Passing open_positions= directly must populate _pos_cache without
+        calling portfolio.get_open_positions()."""
+        from unittest.mock import AsyncMock, patch
+
+        from polymarket_copier.core.risk_manager import Position
+
+        pos = Position(
+            position_id="p1",
+            market_id="mkt-a",
+            token_id="tok-a",
+            trader_address="0xwhale",
+            entry_price=0.50,
+            size_shares=100.0,
+            peak_price=0.50,
+            side="YES",
+            tp_price=0.70,
+            sl_price=0.375,
+        )
+
+        with patch.object(copier.portfolio, "get_open_positions", new=AsyncMock()) as mock_db:
+            await copier.rehydrate_position_cache(open_positions=[pos])
+            mock_db.assert_not_called()
+
+        assert "tok-a" in copier._pos_cache
+        assert copier._pos_cache["tok-a"][0] is pos
+
+    @pytest.mark.asyncio
+    async def test_rehydrate_without_prefetch_queries_db(self, copier):
+        """Calling without open_positions= must fall back to the DB query."""
+        await copier.handle_trade_event(buy_event(token="tok-b"))
+        # Clear in-memory cache to simulate restart state.
+        copier._pos_cache.clear()
+        await copier.rehydrate_position_cache()
+        assert "tok-b" in copier._pos_cache
+
+
+class TestConcurrentExitLock:
+    """C4: per-position lock must prevent two simultaneous exit triggers from
+    both placing a SELL order for the same position."""
+
+    @pytest.mark.asyncio
+    async def test_concurrent_exit_triggers_place_only_one_sell(self, copier):
+        """Two concurrent handle_price_tick calls at the TP level for the same
+        position must not both reach _exit_position_locked."""
+        import asyncio
+
+        from polymarket_copier.core.monitor import PriceTick
+
+        # Open a position at 0.50; TP is entry + (1−entry)*0.40 = 0.70
+        await copier.handle_trade_event(buy_event(price=0.50, token="tok-a"))
+        assert await copier.portfolio.position_count() == 1
+
+        # Count how many times the underlying locked exit logic runs.
+        locked_call_count = 0
+        original_locked = copier._exit_position_locked
+
+        async def counting_locked(pos, price, reason):
+            nonlocal locked_call_count
+            locked_call_count += 1
+            await original_locked(pos, price, reason)
+
+        copier._exit_position_locked = counting_locked
+
+        # Fire two TP ticks simultaneously.
+        tick = PriceTick(token_id="tok-a", price=0.75)
+        await asyncio.gather(
+            copier.handle_price_tick(tick),
+            copier.handle_price_tick(tick),
+        )
+
+        assert locked_call_count == 1, (
+            f"_exit_position_locked called {locked_call_count} times; "
+            "concurrent exit guard should allow exactly one execution"
+        )
+        assert await copier.portfolio.position_count() == 0, "Position should be closed"
+
+    @pytest.mark.asyncio
+    async def test_exit_lock_cleaned_up_after_close(self, copier):
+        """_exit_locks dict must be empty after a position is closed so the next
+        open on the same token_id starts with a fresh lock."""
+        from polymarket_copier.core.monitor import PriceTick
+
+        await copier.handle_trade_event(buy_event(price=0.50, token="tok-a"))
+        await copier.handle_price_tick(PriceTick(token_id="tok-a", price=0.75))
+
+        # After close the lock entry should have been popped.
+        assert await copier.portfolio.position_count() == 0
+        assert len(copier._exit_locks) == 0, "_exit_locks not cleaned up after close"
