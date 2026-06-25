@@ -16,6 +16,7 @@ from polymarket_copier.core.portfolio import PortfolioManager
 from polymarket_copier.core.risk_manager import ExitReason, ExposureCapError, Position, RiskManager
 from polymarket_copier.core.sizing import kelly_size_from_edge, kelly_size_usdc, roi_to_edge
 from polymarket_copier.models.types import Order
+from polymarket_copier.utils.addresses import normalize_address
 from polymarket_copier.utils.logger import log_event
 
 logger = logging.getLogger("polymarket_copier")
@@ -85,7 +86,7 @@ class CopyTrader:
         always uses the most recent leaderboard win rates as a prior during
         the warm-up period before the bot's own sample is large enough.
         """
-        self._tracker_win_rates = dict(rates)
+        self._tracker_win_rates = {normalize_address(k): v for k, v in rates.items()}
         self._tracker_updated_at = time.time()  # M4: stamp for prior-decay
 
     def update_tracker_mean_pnl(self, rois: dict[str, float]) -> None:
@@ -95,7 +96,7 @@ class CopyTrader:
         TrackerClient.refresh(). The edge-based Kelly seed path derives a probability
         edge from these ROIs rather than from the favorite-buyer-biased win rate.
         """
-        self._tracker_mean_pnl = dict(rois)
+        self._tracker_mean_pnl = {normalize_address(k): v for k, v in rois.items()}
         self._tracker_updated_at = time.time()  # M4: stamp for prior-decay
 
     async def rehydrate_position_cache(self) -> None:

@@ -46,6 +46,8 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import aiohttp
 
+from polymarket_copier.utils.addresses import normalize_address
+
 logger = logging.getLogger(__name__)
 
 _EPSILON = 1e-9
@@ -340,8 +342,8 @@ class TrackerClient:
             return []
 
         # Build set of traders in both windows (H15: dual-window consistency filter)
-        recent_addrs = {e.get("name", "") for e in recent_window}
-        candidates = [e for e in all_window if e.get("name", "") in recent_addrs]
+        recent_addrs = {normalize_address(e.get("name", "")) for e in recent_window}
+        candidates = [e for e in all_window if normalize_address(e.get("name", "")) in recent_addrs]
 
         if not candidates:
             logger.warning("No traders found in both all-time and recent windows.")
@@ -464,7 +466,7 @@ class TrackerClient:
         Returns a cached result if the cache is valid and force_refresh is False,
         avoiding redundant /activity API calls on the rebalance cycle.
         """
-        address = leaderboard_entry.get("name", "")  # "name" = wallet address
+        address = normalize_address(leaderboard_entry.get("name", ""))  # "name" = wallet address
         pseudonym = leaderboard_entry.get("pseudonym", "")
         total_pnl = float(leaderboard_entry.get("pnl", 0))
 

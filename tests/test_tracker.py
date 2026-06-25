@@ -542,7 +542,7 @@ class TestStatsCache:
         """When cache is warm, _fetch_activity should not be called."""
         client = TrackerClient(config=TrackerConfig(activity_cache_ttl_hours=6.0))
         stats = make_stats(pnl_list=[10.0, 12.0])
-        client._stats_cache["0xA"] = (stats, time.time())
+        client._stats_cache["0xa"] = (stats, time.time())  # normalized key
 
         fetch_called = []
 
@@ -562,7 +562,7 @@ class TestStatsCache:
         """force_refresh=True should ignore cache and re-fetch activity."""
         client = TrackerClient(config=TrackerConfig(activity_cache_ttl_hours=6.0))
         old_stats = make_stats(pnl_list=[10.0])
-        client._stats_cache["0xA"] = (old_stats, time.time())
+        client._stats_cache["0xa"] = (old_stats, time.time())
 
         fresh_trades = [
             {"type": "BUY", "outcomeIndex": "0", "size": "100", "price": "0.5", "timestamp": str(int(time.time()))},
@@ -582,4 +582,4 @@ class TestStatsCache:
         # Result is freshly computed (not the old cached object)
         assert result is not old_stats
         # Cache updated with new stats
-        assert client._stats_cache["0xA"][0] is result
+        assert client._stats_cache["0xa"][0] is result
