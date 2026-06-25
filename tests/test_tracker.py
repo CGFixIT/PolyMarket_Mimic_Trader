@@ -577,9 +577,7 @@ class TestStatsCache:
 
         entry = {"name": "0xA", "pnl": 50000, "pseudonym": "A"}
         with patch.object(client, "_fetch_activity", new=AsyncMock(return_value=fresh_trades)):
-            result = await client._build_trader_stats(
-                session=AsyncMock(), leaderboard_entry=entry, force_refresh=True
-            )
+            result = await client._build_trader_stats(session=AsyncMock(), leaderboard_entry=entry, force_refresh=True)
 
         # Result is freshly computed (not the old cached object)
         assert result is not old_stats
