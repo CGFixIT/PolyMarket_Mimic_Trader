@@ -167,6 +167,33 @@ class ClobClient:
         """M11: live-exec slippage tolerance scaled up by order size (impact-aware)."""
         return self.config.copy_trading.max_live_slippage_pct * self._size_multiplier(size_usdc)
 
+    def _round_exec_to_tick(self, exec_price: float, side: str) -> float:
+        """M15: snap the final submitted price to the CLOB tick grid.
+
+        After the slippage cap is applied, exec_price is almost never on-tick
+        (e.g. 0.37 * 1.02 = 0.3774). Polymarket rejects off-tick prices outright,
+        so a live order priced at 0.3774 is silently dropped — the entry is missed
+        or, worse, an exit never liquidates.
+
+        Direction preserves the order's aggressive (book-crossing) intent so the
+        rounding never turns a marketable order into a non-marketable one:
+          BUY  → round UP   (ceil): still lifts the ask, guarantees the cross.
+          SELL → round DOWN (floor): still hits the bid, guarantees the cross.
+        Result is clamped to the valid (0, 1) token range, never to 0 or 1 exactly
+        (a 0/1 limit is not a tradeable price).
+        """
+        tick = self.config.copy_trading.order_price_tick
+        if tick <= 0:
+            return exec_price
+        if side == "BUY":
+            rounded = math.ceil(exec_price / tick) * tick
+        else:
+            rounded = math.floor(exec_price / tick) * tick
+        # Clamp into (0, 1): the extreme tradeable prices are one tick inside [0, 1].
+        rounded = min(max(rounded, tick), 1.0 - tick)
+        # Float accumulation (e.g. 0.01*37) can leave sub-tick noise; quantize it out.
+        return round(rounded, 10)
+
     def _check_liquidity(self, book: dict, price: float, size_usdc: float) -> None:
         """Ensure the ASK side can fill a BUY at a volume-weighted average price within
         max_live_slippage_pct of the order price. A market BUY lifts asks, so the ask
@@ -276,6 +303,9 @@ class ClobClient:
             exec_price = min(order.price * (1.0 + slippage_cap), 1.0)
         else:
             exec_price = max(order.price * (1.0 - slippage_cap), 0.0)
+
+        # M15: snap to the tick grid so the venue accepts the price (off-tick = rejected).
+        exec_price = self._round_exec_to_tick(exec_price, order.side)
 
         size_shares = order.size_usdc / order.price if order.price > 0 else 0
         order_type_str = order.order_type  # capture for closure
