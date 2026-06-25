@@ -124,6 +124,9 @@ class TestAppConfig:
         assert config.trader_selection.sharpe_shrink_min_trades == 20
         assert config.trader_selection.min_expectancy == 0.01
         assert config.trader_selection.recent_window_days == 30
+        # M13: frequency normalization + worthless-expiry imputation defaults
+        assert config.trader_selection.freq_scale_cap == 3.0
+        assert config.trader_selection.impute_loss_after_days == 30.0
 
     def test_chunk3_risk_refinement_fields(self):
         # Chunk 3 (M9/L5) risk-refinement knobs

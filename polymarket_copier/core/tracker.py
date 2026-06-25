@@ -72,6 +72,14 @@ class TrackerConfig:
     sharpe_cap: float = 3.0  # H14: cap Sharpe to prevent outlier amplification
     sharpe_shrink_min_trades: int = 20  # H14: shrink Sharpe below this sample size
 
+    # M13: frequency normalization — Sharpe/consistency scaled by sqrt(trades/week),
+    # capped so a very high-frequency trader doesn't drown out the score components.
+    freq_scale_cap: float = 3.0  # max sqrt(trades_per_week) multiplier
+
+    # M13: worthless-expiry imputation — open buys with no sell/redeem after
+    # `impute_loss_after_days` days are treated as −100% losses.  0.0 disables.
+    impute_loss_after_days: float = 30.0
+
     # Data fetch limits
     activity_fetch_limit: int = 500  # Trades to pull per trader for stats
     leaderboard_limit: int = 50  # Candidates to fetch from leaderboard
@@ -115,6 +123,9 @@ class TraderStats:
     # a throwaway, the same $2k from a $2k-typical trader is a full-conviction bet.
     # 0.0 when no buy sizes are available (e.g. leaderboard-only stats).
     typical_trade_size: float = 0.0
+    # M13: observed trades per week over the activity window.  0.0 when the window
+    # cannot be computed (< 2 trades or all at the same timestamp).
+    trades_per_week: float = 0.0
 
     @property
     def mean_pnl(self) -> float:
@@ -186,6 +197,14 @@ class TraderScorer:
         sharpe = self._capped_sharpe(stats)
         consistency = stats.win_rate * math.log(stats.trade_count + 1)
         recency = self._recency_weight(stats.last_trade_time)
+
+        # M13: frequency normalization — scale Sharpe and consistency by
+        # sqrt(trades_per_week), capped at freq_scale_cap, so a trader who
+        # generates signals once/yr at the same per-trade Sharpe scores lower
+        # than one who generates the same edge at 5 trades/week.
+        freq_mult = self._freq_multiplier(stats.trades_per_week)
+        sharpe *= freq_mult
+        consistency *= freq_mult
 
         # H14: weighted sum instead of multiplication to prevent single extreme
         # component from dominating. Weights: sharpe (40%) + consistency (35%) + recency (25%).
@@ -260,6 +279,15 @@ class TraderScorer:
 
         # Cap at maximum to prevent one extreme component from dominating
         return min(sharpe, self.cfg.sharpe_cap)
+
+    def _freq_multiplier(self, trades_per_week: float) -> float:
+        """
+        M13: sqrt(trades_per_week) capped at freq_scale_cap, or 1.0 when unknown.
+        Applied to both Sharpe and consistency so signal-rich traders rank higher.
+        """
+        if trades_per_week <= 0:
+            return 1.0
+        return min(math.sqrt(trades_per_week), self.cfg.freq_scale_cap)
 
     def _recency_weight(self, last_trade_time: float) -> float:
         """
@@ -430,7 +458,13 @@ class TrackerClient:
                 last_trade_time=0.0,
             )
 
-        return _compute_trader_stats(address, pseudonym, total_pnl, trades)
+        return _compute_trader_stats(
+            address,
+            pseudonym,
+            total_pnl,
+            trades,
+            impute_loss_after_days=self.cfg.impute_loss_after_days,
+        )
 
     async def _fetch_activity(
         self,
@@ -463,6 +497,7 @@ def _compute_trader_stats(
     pseudonym: str,
     total_pnl: float,
     activity: List[dict],
+    impute_loss_after_days: float = 30.0,
 ) -> TraderStats:
     """
     Derive TraderStats from raw activity records.
@@ -487,13 +522,17 @@ def _compute_trader_stats(
     pay $1.00, losing shares pay $0.00). We treat redemption/claim records as realizing
     events so held-to-resolution outcomes are counted, not silently dropped.
 
-    LIMITATION (honest accounting): we can only credit redemptions we OBSERVE in the
-    activity feed. Winning positions emit a redeem/claim record (captured). Losing
-    positions expiring worthless typically emit NO redeem record — nothing to redeem —
-    so those losses remain uncounted. This biases observed win_rate UPWARD for traders
-    who hold losers to worthless expiry. Monitor this when interpreting stats.
+    M13 — WORTHLESS-EXPIRY IMPUTATION
+    -----------------------------------
+    Losing positions held to worthless expiry emit NO redeem record, biasing
+    win_rate upward. After the main loop, any open buy older than
+    `impute_loss_after_days` days (default 30) is treated as −100% (total loss).
+    Buys more recent than the threshold are excluded (still open, outcome unknown).
 
-    Partial data is excluded rather than estimated.
+    M13 — FREQUENCY NORMALIZATION
+    -----------------------------------
+    trades_per_week is computed from the observation window spanned by the
+    activity feed, so it can be used by TraderScorer to apply a sqrt(freq) bonus.
     """
     trade_records: List[TradeRecord] = []
     last_trade_ts = 0.0
@@ -585,9 +624,38 @@ def _compute_trader_stats(
                 )
             )
 
+    # M13: impute worthless-expiry losses. Any open buy older than the threshold
+    # (no sell or redeem observed) is assumed to have expired worthless → −100% ROI.
+    # Buys within the threshold are still open (excluded — outcome unknown).
+    if impute_loss_after_days > 0:
+        cutoff_age_secs = impute_loss_after_days * 86_400.0
+        now = time.time()
+        for buys_for_key in open_buys.values():
+            for buy in buys_for_key:
+                age = now - buy["ts"]
+                if age >= cutoff_age_secs:
+                    # Worthless expiry: payout = 0, ROI = −100%.
+                    trade_records.append(
+                        TradeRecord(
+                            trade_id="imputed-loss",
+                            market_id="",
+                            pnl=-1.0,  # −100% ROI
+                            is_win=False,
+                            executed_at=buy["ts"],
+                        )
+                    )
+
     # M4: median buy notional — robust to the occasional outlier trade. 0.0 when no
     # buy sizes were observed (the copier's conviction signal then no-ops).
     typical_trade_size = statistics.median(buy_sizes) if buy_sizes else 0.0
+
+    # M13: trades_per_week — span from first to last trade timestamp.
+    all_timestamps = sorted(t.executed_at for t in trade_records if t.executed_at > 0)
+    if len(all_timestamps) >= 2:
+        span_weeks = (all_timestamps[-1] - all_timestamps[0]) / (7 * 86_400.0)
+        trades_per_week = len(trade_records) / max(span_weeks, _EPSILON)
+    else:
+        trades_per_week = 0.0
 
     if not trade_records:
         return TraderStats(
@@ -599,6 +667,7 @@ def _compute_trader_stats(
             pnl_per_trade=[],
             last_trade_time=last_trade_ts,
             typical_trade_size=typical_trade_size,
+            trades_per_week=0.0,
         )
 
     wins = sum(1 for t in trade_records if t.is_win)
@@ -614,6 +683,7 @@ def _compute_trader_stats(
         pnl_per_trade=pnl_per_trade,
         last_trade_time=last_trade_ts,
         typical_trade_size=typical_trade_size,
+        trades_per_week=trades_per_week,
     )
 
 

@@ -37,6 +37,10 @@ class TraderSelectionConfig(BaseModel):
     min_expectancy: float = 0.01
     # H15: also fetch leaderboard in this window (days) to filter for consistency
     recent_window_days: int = 30
+    # M13: frequency normalization — sqrt(trades_per_week) multiplier cap
+    freq_scale_cap: float = 3.0
+    # M13: impute open buys older than this as −100% losses (0.0 = disabled)
+    impute_loss_after_days: float = 30.0
 
 
 class CopyTradingConfig(BaseModel):

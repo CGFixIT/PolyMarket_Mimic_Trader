@@ -106,6 +106,8 @@ async def run_bot(config_path: Optional[str] = None, mode: Optional[str] = None)
         sharpe_shrink_min_trades=config.trader_selection.sharpe_shrink_min_trades,
         rebalance_interval_days=config.trader_selection.rebalance_days,
         recent_window_days=config.trader_selection.recent_window_days,
+        freq_scale_cap=config.trader_selection.freq_scale_cap,
+        impute_loss_after_days=config.trader_selection.impute_loss_after_days,
     )
     tracker = TrackerClient(config=tracker_cfg)
     top_traders = await tracker.refresh()

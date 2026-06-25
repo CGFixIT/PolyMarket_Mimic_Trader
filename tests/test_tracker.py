@@ -248,8 +248,8 @@ class TestComputeTraderStats:
         # cost_basis = 0.40 * 100 = 40.0; roi = 60.0 / 40.0 = 1.5 (150% return)
         assert stats.pnl_per_trade == [pytest.approx(1.5)]
 
-    def test_buy_without_sell_or_redeem_not_counted(self):
-        # Unchanged behavior: an open buy with no realizing event is excluded.
+    def test_buy_without_sell_or_redeem_not_counted_when_imputation_disabled(self):
+        # impute_loss_after_days=0.0 disables imputation: open buys remain uncounted.
         activity = [
             {
                 "id": "b1",
@@ -262,7 +262,7 @@ class TestComputeTraderStats:
                 "timestamp": 1_700_000_000,
             },
         ]
-        stats = _compute_trader_stats("0xabc", "Name", 50000, activity)
+        stats = _compute_trader_stats("0xabc", "Name", 50000, activity, impute_loss_after_days=0.0)
         # No realizing event → no TradeRecord produced (no win/loss credited).
         # (trade_count falls back to len(activity) when there are zero records,
         # matching the pre-existing no-trades fallback path — unchanged.)
@@ -516,3 +516,200 @@ class TestTrackerAccessors:
     def test_needs_rebalance_true_when_never_refreshed(self):
         # _last_refresh defaults to 0.0, so the elapsed interval is enormous.
         assert TrackerClient().needs_rebalance is True
+
+
+class TestWorthlessExpiryImputation:
+    """M13: open buys older than threshold are imputed as −100% losses."""
+
+    @staticmethod
+    def _buy(market="m", asset="a", price="0.50", size="100", ts=1_700_000_000):
+        return {
+            "id": "b1",
+            "type": "trade",
+            "side": "BUY",
+            "market": market,
+            "asset": asset,
+            "price": price,
+            "size": size,
+            "timestamp": ts,
+        }
+
+    def test_old_open_buy_imputed_as_loss(self):
+        # Buy timestamp is 60 days old (> 30d threshold) → imputed as −100%.
+        old_ts = 1_700_000_000
+        activity = [self._buy(ts=old_ts)]
+        stats = _compute_trader_stats("0xabc", "Name", 50000, activity, impute_loss_after_days=30.0)
+        assert stats.trade_count == 1
+        assert stats.win_rate == 0.0
+        assert stats.pnl_per_trade == pytest.approx([-1.0])
+
+    def test_recent_open_buy_not_imputed(self):
+        # Buy timestamp is 5 days old (< 30d threshold) → still open, not counted.
+        import time as _time
+
+        recent_ts = _time.time() - 5 * 86_400
+        activity = [self._buy(ts=recent_ts)]
+        stats = _compute_trader_stats("0xabc", "Name", 50000, activity, impute_loss_after_days=30.0)
+        assert stats.pnl_per_trade == []
+
+    def test_imputation_disabled_when_zero(self):
+        # impute_loss_after_days=0 → open buys never imputed regardless of age.
+        activity = [self._buy(ts=1_700_000_000)]
+        stats = _compute_trader_stats("0xabc", "Name", 50000, activity, impute_loss_after_days=0.0)
+        assert stats.pnl_per_trade == []
+
+    def test_imputation_lowers_win_rate_vs_winning_sell(self):
+        # One win + one old open buy → win_rate drops from 1.0 to 0.5.
+        activity = [
+            self._buy(market="m1", asset="a1", ts=1_700_000_000),
+            {
+                "id": "s1",
+                "type": "trade",
+                "side": "SELL",
+                "market": "m1",
+                "asset": "a1",
+                "price": "0.70",
+                "size": "70",
+                "timestamp": 1_700_001_000,
+            },
+            self._buy(market="m2", asset="a2", ts=1_700_000_500),
+        ]
+        stats = _compute_trader_stats("0xabc", "Name", 50000, activity, impute_loss_after_days=30.0)
+        assert stats.trade_count == 2
+        assert stats.win_rate == pytest.approx(0.5)
+
+    def test_multiple_open_buys_same_key_all_imputed(self):
+        # Two open buys on same (market, asset) — both should be imputed.
+        activity = [
+            self._buy(ts=1_700_000_000),
+            self._buy(ts=1_700_001_000),
+        ]
+        stats = _compute_trader_stats("0xabc", "Name", 50000, activity, impute_loss_after_days=30.0)
+        assert stats.trade_count == 2
+        assert stats.pnl_per_trade == pytest.approx([-1.0, -1.0])
+
+
+class TestFrequencyNormalization:
+    """M13: trades_per_week computed; freq_multiplier applied in scoring."""
+
+    @staticmethod
+    def _make_stats(**kwargs) -> TraderStats:
+        defaults = dict(
+            address="0xabc",
+            pseudonym="",
+            total_pnl=50_000.0,
+            trade_count=100,
+            win_rate=0.60,
+            pnl_per_trade=[0.10] * 100,
+            last_trade_time=1_700_000_000.0,
+            trades_per_week=0.0,
+        )
+        defaults.update(kwargs)
+        return TraderStats(**defaults)
+
+    def test_trades_per_week_computed(self):
+        # 4 trades over 28 days → 1 trade/week.
+        base_ts = 1_700_000_000
+        week = 7 * 86_400
+        activity = []
+        for i in range(4):
+            activity.append(
+                {
+                    "id": f"b{i}",
+                    "type": "trade",
+                    "side": "BUY",
+                    "market": f"m{i}",
+                    "asset": f"a{i}",
+                    "price": "0.50",
+                    "size": "100",
+                    "timestamp": base_ts + i * week,
+                }
+            )
+            activity.append(
+                {
+                    "id": f"s{i}",
+                    "type": "trade",
+                    "side": "SELL",
+                    "market": f"m{i}",
+                    "asset": f"a{i}",
+                    "price": "0.70",
+                    "size": "70",
+                    "timestamp": base_ts + i * week + 3600,
+                }
+            )
+        stats = _compute_trader_stats("0xabc", "Name", 50000, activity, impute_loss_after_days=0.0)
+        # 4 trades over 3 weeks (first ts to last ts) → ~1.33 trades/week
+        assert stats.trades_per_week == pytest.approx(4 / 3.0, rel=0.01)
+
+    def test_single_trade_has_zero_trades_per_week(self):
+        # Cannot compute span from one timestamp → 0.0.
+        activity = [
+            {
+                "id": "b1",
+                "type": "trade",
+                "side": "BUY",
+                "market": "m",
+                "asset": "a",
+                "price": "0.50",
+                "size": "100",
+                "timestamp": 1_700_000_000,
+            },
+            {
+                "id": "s1",
+                "type": "trade",
+                "side": "SELL",
+                "market": "m",
+                "asset": "a",
+                "price": "0.70",
+                "size": "70",
+                "timestamp": 1_700_000_000,
+            },
+        ]
+        stats = _compute_trader_stats("0xabc", "Name", 50000, activity, impute_loss_after_days=0.0)
+        # Both at same timestamp → span = 0 → trades_per_week = 0.
+        assert stats.trades_per_week == 0.0
+
+    def test_freq_multiplier_scales_score(self):
+        # A trader with trades_per_week=4 should score higher than one with 0.25
+        # when all other stats are identical.
+        cfg = TrackerConfig(
+            min_total_pnl=0.0,
+            min_trade_count=1,
+            min_expectancy=0.0,
+            freq_scale_cap=5.0,
+        )
+        scorer = TraderScorer(cfg)
+
+        high_freq = self._make_stats(trades_per_week=4.0)
+        low_freq = self._make_stats(trades_per_week=0.25)
+
+        result_high = scorer.score(high_freq)
+        result_low = scorer.score(low_freq)
+
+        assert result_high is not None and result_low is not None
+        assert result_high.score > result_low.score
+
+    def test_zero_trades_per_week_uses_multiplier_one(self):
+        # trades_per_week=0 → multiplier=1.0 → same result as baseline.
+        cfg = TrackerConfig(min_total_pnl=0.0, min_trade_count=1, min_expectancy=0.0)
+        scorer = TraderScorer(cfg)
+
+        stats_zero = self._make_stats(trades_per_week=0.0)
+        stats_one_per_week = self._make_stats(trades_per_week=1.0)  # sqrt(1)=1 → same mult
+
+        r_zero = scorer.score(stats_zero)
+        r_one = scorer.score(stats_one_per_week)
+        assert r_zero is not None and r_one is not None
+        assert r_zero.score == pytest.approx(r_one.score)
+
+    def test_freq_scale_cap_limits_multiplier(self):
+        # trades_per_week=100 → sqrt=10, but cap=3 → multiplier stays at 3.
+        cfg = TrackerConfig(min_total_pnl=0.0, min_trade_count=1, min_expectancy=0.0, freq_scale_cap=3.0)
+        scorer = TraderScorer(cfg)
+        stats_high = self._make_stats(trades_per_week=100.0)
+        stats_cap = self._make_stats(trades_per_week=9.0)  # sqrt(9)=3 = cap exactly
+
+        r_high = scorer.score(stats_high)
+        r_cap = scorer.score(stats_cap)
+        assert r_high is not None and r_cap is not None
+        assert r_high.score == pytest.approx(r_cap.score)
