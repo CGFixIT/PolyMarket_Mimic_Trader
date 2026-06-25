@@ -108,6 +108,8 @@ async def run_bot(config_path: Optional[str] = None, mode: Optional[str] = None)
         recent_window_days=config.trader_selection.recent_window_days,
         freq_scale_cap=config.trader_selection.freq_scale_cap,
         impute_loss_after_days=config.trader_selection.impute_loss_after_days,
+        diversify_enabled=config.trader_selection.diversify_enabled,
+        overlap_penalty=config.trader_selection.overlap_penalty,
     )
     tracker = TrackerClient(config=tracker_cfg)
     top_traders = await tracker.refresh()

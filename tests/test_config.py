@@ -130,6 +130,9 @@ class TestAppConfig:
         # M13: frequency normalization + worthless-expiry imputation defaults
         assert config.trader_selection.freq_scale_cap == 3.0
         assert config.trader_selection.impute_loss_after_days == 30.0
+        # L7: diversified selection defaults (opt-in)
+        assert config.trader_selection.diversify_enabled is False
+        assert config.trader_selection.overlap_penalty == 0.5
 
     def test_chunk3_risk_refinement_fields(self):
         # Chunk 3 (M9/L5) risk-refinement knobs

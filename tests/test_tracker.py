@@ -713,3 +713,130 @@ class TestFrequencyNormalization:
         r_cap = scorer.score(stats_cap)
         assert r_high is not None and r_cap is not None
         assert r_high.score == pytest.approx(r_cap.score)
+
+
+class TestDiversifiedSelection:
+    """L7: the final top-N is diversified by market overlap so it isn't all the
+    same correlated favorite-buyers."""
+
+    @staticmethod
+    def _stats(addr, markets, mean=0.10):
+        # A clean, eligible trader with a fixed per-trade ROI and given markets.
+        return TraderStats(
+            address=addr,
+            pseudonym=addr,
+            total_pnl=50_000.0,
+            trade_count=100,
+            win_rate=0.60,
+            pnl_per_trade=[mean] * 100,
+            last_trade_time=time.time(),
+            markets=frozenset(markets),
+        )
+
+    def _scorer(self, **overrides):
+        params = dict(
+            min_total_pnl=0.0,
+            min_trade_count=1,
+            min_expectancy=0.0,
+            max_top_traders=2,
+            diversify_enabled=True,
+            overlap_penalty=0.5,
+        )
+        params.update(overrides)
+        return TraderScorer(TrackerConfig(**params))
+
+    def test_overlap_penalty_demotes_correlated_trader(self):
+        # A and B trade the SAME markets (high score, but redundant); C trades a
+        # disjoint set at a slightly lower score. Diversification should pick A then
+        # C (not B), trading a little score for independence.
+        scorer = self._scorer()
+        a = self._stats("A", {"m1", "m2", "m3"}, mean=0.20)  # top score
+        b = self._stats("B", {"m1", "m2", "m3"}, mean=0.19)  # nearly identical book
+        c = self._stats("C", {"m9", "m8", "m7"}, mean=0.18)  # disjoint book
+        top = scorer.score_many([a, b, c])
+        assert [t.stats.address for t in top] == ["A", "C"]
+
+    def test_no_overlap_keeps_pure_score_order(self):
+        # All disjoint markets → no penalty → ranking is pure score order.
+        scorer = self._scorer()
+        a = self._stats("A", {"m1"}, mean=0.20)
+        b = self._stats("B", {"m2"}, mean=0.19)
+        c = self._stats("C", {"m3"}, mean=0.05)
+        top = scorer.score_many([a, b, c])
+        assert [t.stats.address for t in top] == ["A", "B"]
+
+    def test_disabled_uses_pure_score_order(self):
+        # With diversify disabled, the two highest scorers win even if identical.
+        scorer = self._scorer(diversify_enabled=False)
+        a = self._stats("A", {"m1", "m2"}, mean=0.20)
+        b = self._stats("B", {"m1", "m2"}, mean=0.19)
+        c = self._stats("C", {"m9"}, mean=0.18)
+        top = scorer.score_many([a, b, c])
+        assert [t.stats.address for t in top] == ["A", "B"]
+
+    def test_top_scorer_always_picked_first(self):
+        scorer = self._scorer()
+        a = self._stats("A", {"m1", "m2", "m3"}, mean=0.30)
+        b = self._stats("B", {"m4"}, mean=0.10)
+        c = self._stats("C", {"m5"}, mean=0.10)
+        top = scorer.score_many([a, b, c])
+        assert top[0].stats.address == "A"
+        assert top[0].rank == 1
+
+    def test_empty_markets_no_penalty(self):
+        # Traders with no market data can't be assessed for overlap → score order.
+        scorer = self._scorer()
+        a = self._stats("A", set(), mean=0.20)
+        b = self._stats("B", set(), mean=0.19)
+        c = self._stats("C", set(), mean=0.05)
+        top = scorer.score_many([a, b, c])
+        assert [t.stats.address for t in top] == ["A", "B"]
+
+
+class TestMarketsTracked:
+    """L7: _compute_trader_stats records the distinct markets a trader touched."""
+
+    def test_markets_collected_from_activity(self):
+        activity = [
+            {
+                "id": "b1",
+                "type": "trade",
+                "side": "BUY",
+                "market": "m1",
+                "asset": "a1",
+                "price": "0.50",
+                "size": "100",
+                "timestamp": 1_700_000_000,
+            },
+            {
+                "id": "s1",
+                "type": "trade",
+                "side": "SELL",
+                "market": "m1",
+                "asset": "a1",
+                "price": "0.60",
+                "size": "60",
+                "timestamp": 1_700_001_000,
+            },
+            {
+                "id": "b2",
+                "type": "trade",
+                "side": "BUY",
+                "market": "m2",
+                "asset": "a2",
+                "price": "0.20",
+                "size": "20",
+                "timestamp": 1_700_000_500,
+            },
+            {
+                "id": "r2",
+                "type": "redeem",
+                "market": "m2",
+                "asset": "a2",
+                "price": "1.0",
+                "size": "100",
+                "timestamp": 1_700_003_000,
+            },
+        ]
+        stats = _compute_trader_stats("0xabc", "Name", 50000, activity)
+        assert stats.markets == frozenset({"m1", "m2"})

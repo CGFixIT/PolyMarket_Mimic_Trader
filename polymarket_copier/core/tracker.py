@@ -80,6 +80,13 @@ class TrackerConfig:
     # `impute_loss_after_days` days are treated as −100% losses.  0.0 disables.
     impute_loss_after_days: float = 30.0
 
+    # L7: diversify the final top-N by market overlap so the selection isn't all the
+    # same correlated favorite-buyers. Greedy: after the top scorer, each subsequent
+    # pick's score is discounted by overlap_penalty × its max Jaccard market-overlap
+    # with the already-selected traders. Opt-in (default off → pure score order).
+    diversify_enabled: bool = False
+    overlap_penalty: float = 0.5
+
     # Data fetch limits
     activity_fetch_limit: int = 500  # Trades to pull per trader for stats
     leaderboard_limit: int = 50  # Candidates to fetch from leaderboard
@@ -126,6 +133,10 @@ class TraderStats:
     # M13: observed trades per week over the activity window.  0.0 when the window
     # cannot be computed (< 2 trades or all at the same timestamp).
     trades_per_week: float = 0.0
+    # L7: the distinct market ids this trader was active in. Used to diversify the
+    # final top-N by penalizing high market-overlap so the selection isn't all the
+    # same correlated favorite-buyers piling into one event. Empty → no overlap data.
+    markets: frozenset = field(default_factory=frozenset)
 
     @property
     def mean_pnl(self) -> float:
@@ -231,11 +242,49 @@ class TraderScorer:
 
         scored.sort(key=lambda x: x.score, reverse=True)
 
-        top = scored[: self.cfg.max_top_traders]
+        if self.cfg.diversify_enabled and len(scored) > self.cfg.max_top_traders:
+            top = self._diversified_select(scored)
+        else:
+            top = scored[: self.cfg.max_top_traders]
         for i, trader in enumerate(top):
             trader.rank = i + 1
 
         return top
+
+    def _diversified_select(self, scored: List[ScoredTrader]) -> List[ScoredTrader]:
+        """L7: greedily pick max_top_traders, discounting each candidate's score by
+        its market-overlap with those already chosen, so the final set isn't all the
+        same correlated favorite-buyers. The top scorer is always picked first (no
+        prior selections → no penalty); thereafter the effective score is
+        ``score × (1 − overlap_penalty × max_jaccard_overlap_with_selected)``.
+        """
+        remaining = list(scored)
+        selected: List[ScoredTrader] = []
+        while remaining and len(selected) < self.cfg.max_top_traders:
+            best = max(remaining, key=lambda c: self._effective_score(c, selected))
+            selected.append(best)
+            remaining.remove(best)
+        return selected
+
+    def _effective_score(self, cand: ScoredTrader, selected: List[ScoredTrader]) -> float:
+        """Candidate score discounted by its peak market-overlap with the selected set."""
+        return cand.score * (1.0 - self.cfg.overlap_penalty * self._max_overlap(cand, selected))
+
+    @staticmethod
+    def _max_overlap(cand: ScoredTrader, selected: List[ScoredTrader]) -> float:
+        """Largest Jaccard market-set overlap between cand and any selected trader.
+        Returns 0.0 when overlap can't be assessed (no selections, or empty markets)."""
+        cm = cand.stats.markets
+        if not cm:
+            return 0.0
+        best = 0.0
+        for other in selected:
+            om = other.stats.markets
+            if not om:
+                continue
+            jaccard = len(cm & om) / len(cm | om)
+            best = max(best, jaccard)
+        return best
 
     def _is_eligible(self, stats: TraderStats) -> bool:
         """Return True if the trader passes the min PnL, trade-count, and expectancy thresholds."""
@@ -538,6 +587,8 @@ def _compute_trader_stats(
     last_trade_ts = 0.0
     # M4: every BUY notional (USDC) seen, for the trader's typical-size median.
     buy_sizes: List[float] = []
+    # L7: distinct markets this trader touched, for diversification overlap scoring.
+    markets_seen: set = set()
 
     # Pair BUY and SELL events for the same market/token to estimate PnL.
     open_buys: Dict[Tuple[str, str], List[dict]] = {}
@@ -556,6 +607,8 @@ def _compute_trader_stats(
         market_id = str(item.get("market", item.get("conditionId", "")))
         token_id = str(item.get("asset", item.get("tokenId", "")))
         side = str(item.get("side", "")).upper()
+        if market_id:
+            markets_seen.add(market_id)
 
         try:
             price = float(item.get("price", 0))
@@ -668,6 +721,7 @@ def _compute_trader_stats(
             last_trade_time=last_trade_ts,
             typical_trade_size=typical_trade_size,
             trades_per_week=0.0,
+            markets=frozenset(markets_seen),
         )
 
     wins = sum(1 for t in trade_records if t.is_win)
@@ -684,6 +738,7 @@ def _compute_trader_stats(
         last_trade_time=last_trade_ts,
         typical_trade_size=typical_trade_size,
         trades_per_week=trades_per_week,
+        markets=frozenset(markets_seen),
     )
 
 

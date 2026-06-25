@@ -41,6 +41,10 @@ class TraderSelectionConfig(BaseModel):
     freq_scale_cap: float = 3.0
     # M13: impute open buys older than this as −100% losses (0.0 = disabled)
     impute_loss_after_days: float = 30.0
+    # L7: diversify the final top-N by market overlap (opt-in). overlap_penalty is the
+    # max score discount applied to a fully-overlapping candidate during selection.
+    diversify_enabled: bool = False
+    overlap_penalty: float = 0.5
 
 
 class CopyTradingConfig(BaseModel):
