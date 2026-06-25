@@ -42,6 +42,8 @@ async def build(
     market_id: str = "mkt_default",
     size: float = 100.0,
     resolve_ts: float = None,
+    event_id: str = "",
+    category: str = "",
 ) -> Position:
     """Convenience wrapper around build_position for tests."""
     return await rm.build_position(
@@ -52,6 +54,8 @@ async def build(
         entry_price=entry,
         size_shares=size,
         resolve_time=resolve_ts,
+        event_id=event_id,
+        category=category,
     )
 
 
@@ -804,3 +808,150 @@ class TestRehydrateExposure:
                 entry_price=0.50,
                 size_shares=100.0,  # +$50
             )
+
+
+# ─── [M7] Event-level correlation cap ─────────────────────────────────────────
+
+
+class TestEventExposureCap:
+    @pytest.mark.asyncio
+    async def test_event_cap_blocks_correlated_markets(self):
+        # max_event_exposure_pct=0.12 → $1,200 cap on $10k bankroll. Two markets of
+        # the same event at $700 each would total $1,400 > cap → second is rejected.
+        rm = RiskManager(
+            config=RiskConfig(max_trader_allocation=1.0, max_market_exposure_pct=1.0),
+            bankroll=BANKROLL,
+        )
+        await build(rm, entry=0.70, market_id="mkt-a", size=1000.0, event_id="evt-1")  # $700
+        assert rm.event_exposure("evt-1") == pytest.approx(700.0)
+        with pytest.raises(ExposureCapError, match="Event evt-1"):
+            await build(rm, entry=0.70, market_id="mkt-b", size=1000.0, event_id="evt-1")  # +$700
+
+    @pytest.mark.asyncio
+    async def test_different_events_independent(self):
+        rm = RiskManager(
+            config=RiskConfig(max_trader_allocation=1.0, max_market_exposure_pct=1.0),
+            bankroll=BANKROLL,
+        )
+        await build(rm, entry=0.70, market_id="mkt-a", size=1000.0, event_id="evt-1")
+        # A different event has its own bucket — not blocked.
+        await build(rm, entry=0.70, market_id="mkt-b", size=1000.0, event_id="evt-2")
+        assert rm.event_exposure("evt-1") == pytest.approx(700.0)
+        assert rm.event_exposure("evt-2") == pytest.approx(700.0)
+
+    @pytest.mark.asyncio
+    async def test_blank_event_id_is_noop(self):
+        # No event_id → no event accounting; per-market cap still governs. Two big
+        # positions in different markets with blank event_id both succeed.
+        rm = RiskManager(
+            config=RiskConfig(max_trader_allocation=1.0, max_market_exposure_pct=1.0),
+            bankroll=BANKROLL,
+        )
+        await build(rm, entry=0.70, market_id="mkt-a", size=1000.0, event_id="")
+        await build(rm, entry=0.70, market_id="mkt-b", size=1000.0, event_id="")
+        assert rm.event_exposure("") == pytest.approx(0.0)
+
+    @pytest.mark.asyncio
+    async def test_event_exposure_released_on_exit(self):
+        rm = RiskManager(
+            config=RiskConfig(max_trader_allocation=1.0, max_market_exposure_pct=1.0),
+            bankroll=BANKROLL,
+        )
+        pos = await build(rm, entry=0.70, market_id="mkt-a", size=1000.0, event_id="evt-1")
+        assert rm.event_exposure("evt-1") == pytest.approx(700.0)
+        await rm.record_exit(pos, exit_price=0.75)
+        assert rm.event_exposure("evt-1") == pytest.approx(0.0)
+        # Bucket now free — a fresh correlated position fits again.
+        await build(rm, entry=0.70, market_id="mkt-b", size=1000.0, event_id="evt-1")
+        assert rm.event_exposure("evt-1") == pytest.approx(700.0)
+
+    @pytest.mark.asyncio
+    async def test_event_exposure_released_on_failed_order(self):
+        # release_exposure with event_id rolls back the reservation (e.g. order failed).
+        rm = RiskManager(
+            config=RiskConfig(max_trader_allocation=1.0, max_market_exposure_pct=1.0),
+            bankroll=BANKROLL,
+        )
+        await build(rm, entry=0.70, market_id="mkt-a", size=1000.0, event_id="evt-1")
+        await rm.release_exposure("mkt-a", 700.0, "0xTRADER", "evt-1")
+        assert rm.event_exposure("evt-1") == pytest.approx(0.0)
+
+    @pytest.mark.asyncio
+    async def test_event_exposure_rehydrated_on_restart(self):
+        rm = RiskManager(config=RiskConfig(max_trader_allocation=1.0), bankroll=BANKROLL)
+        rm.rehydrate_exposure("mkt-a", "0xA", 700.0, event_id="evt-1")
+        assert rm.event_exposure("evt-1") == pytest.approx(700.0)
+
+
+# ─── [M6] Regime/vol-adaptive TP/SL widths ────────────────────────────────────
+
+
+class TestVolAdaptiveThresholds:
+    @pytest.mark.asyncio
+    async def test_disabled_is_identical_to_baseline(self):
+        # vol_adaptive_enabled defaults False → category is ignored, TP/SL unchanged.
+        base = RiskManager(config=RiskConfig(max_trader_allocation=1.0), bankroll=BANKROLL)
+        p_plain = await build(base, entry=0.50, market_id="m1")
+        p_cat = await build(base, entry=0.50, market_id="m2", category="crypto")
+        assert (p_plain.tp_price, p_plain.sl_price) == (p_cat.tp_price, p_cat.sl_price)
+
+    @pytest.mark.asyncio
+    async def test_wider_multiplier_widens_tp_and_sl(self):
+        rm = RiskManager(
+            config=RiskConfig(
+                max_trader_allocation=1.0,
+                vol_adaptive_enabled=True,
+                vol_tp_mult_by_category={"crypto": 1.5},
+                vol_sl_mult_by_category={"crypto": 1.5},
+            ),
+            bankroll=BANKROLL,
+        )
+        baseline = await build(rm, entry=0.50, market_id="m1")  # no category → 1.0x
+        widened = await build(rm, entry=0.50, market_id="m2", category="crypto")
+        assert widened.tp_price > baseline.tp_price
+        assert widened.sl_price < baseline.sl_price
+
+    @pytest.mark.asyncio
+    async def test_unknown_category_uses_1x(self):
+        rm = RiskManager(
+            config=RiskConfig(
+                max_trader_allocation=1.0,
+                vol_adaptive_enabled=True,
+                vol_tp_mult_by_category={"crypto": 1.5},
+            ),
+            bankroll=BANKROLL,
+        )
+        baseline = await build(rm, entry=0.50, market_id="m1")
+        unknown = await build(rm, entry=0.50, market_id="m2", category="politics")
+        assert (unknown.tp_price, unknown.sl_price) == (baseline.tp_price, baseline.sl_price)
+
+    @pytest.mark.asyncio
+    async def test_case_insensitive_lookup(self):
+        rm = RiskManager(
+            config=RiskConfig(
+                max_trader_allocation=1.0,
+                vol_adaptive_enabled=True,
+                vol_tp_mult_by_category={"crypto": 1.5},
+            ),
+            bankroll=BANKROLL,
+        )
+        lower = await build(rm, entry=0.50, market_id="m1", category="crypto")
+        upper = await build(rm, entry=0.50, market_id="m2", category="CRYPTO")
+        assert lower.tp_price == upper.tp_price
+
+    @pytest.mark.asyncio
+    async def test_nonpositive_multiplier_ignored(self):
+        # A misconfigured 0/negative multiplier must not zero out the range — it
+        # falls back to 1.0 so TP/SL stay valid.
+        rm = RiskManager(
+            config=RiskConfig(
+                max_trader_allocation=1.0,
+                vol_adaptive_enabled=True,
+                vol_tp_mult_by_category={"crypto": 0.0},
+                vol_sl_mult_by_category={"crypto": -1.0},
+            ),
+            bankroll=BANKROLL,
+        )
+        baseline = await build(rm, entry=0.50, market_id="m1")
+        guarded = await build(rm, entry=0.50, market_id="m2", category="crypto")
+        assert (guarded.tp_price, guarded.sl_price) == (baseline.tp_price, baseline.sl_price)

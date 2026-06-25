@@ -569,6 +569,10 @@ class CopyTrader:
                     entry_price=current_price,
                     size_shares=size_shares,
                     resolve_time=resolve_ts,
+                    # M7/M6: parent-event bucket for the correlation cap, and market
+                    # category for the vol-adaptive TP/SL widths.
+                    event_id=market.event_id if market else "",
+                    category=market.category if market else "",
                 )
             except ExposureCapError as e:
                 logger.info("Skip: exposure cap — %s", e)
@@ -602,14 +606,18 @@ class CopyTrader:
             except InsufficientLiquidityError as e:
                 logger.info("Skip: insufficient liquidity — %s", e)
                 self._remove_pos_from_cache(pos)
-                await self.risk.release_exposure(pos.market_id, pos.entry_price * pos.size_shares, pos.trader_address)
+                await self.risk.release_exposure(
+                    pos.market_id, pos.entry_price * pos.size_shares, pos.trader_address, pos.event_id
+                )
                 metrics.EXPOSURE_RELEASED.labels(cause="insufficient_liquidity").inc()
                 self._record_skip("insufficient_liquidity", event)
                 return
             except Exception as e:
                 logger.error("Order placement failed: %s", e)
                 self._remove_pos_from_cache(pos)
-                await self.risk.release_exposure(pos.market_id, pos.entry_price * pos.size_shares, pos.trader_address)
+                await self.risk.release_exposure(
+                    pos.market_id, pos.entry_price * pos.size_shares, pos.trader_address, pos.event_id
+                )
                 metrics.EXPOSURE_RELEASED.labels(cause="order_failed").inc()
                 self._record_skip("order_failed", event)
                 return
@@ -627,7 +635,7 @@ class CopyTrader:
 
             if filled_shares <= 0.0:
                 self._remove_pos_from_cache(pos)
-                await self.risk.release_exposure(pos.market_id, registered_notional, pos.trader_address)
+                await self.risk.release_exposure(pos.market_id, registered_notional, pos.trader_address, pos.event_id)
                 metrics.EXPOSURE_RELEASED.labels(cause="no_fill").inc()
                 logger.info(
                     "Skip: order did not fill (0 shares) — released $%.2f exposure on %s",
@@ -640,7 +648,7 @@ class CopyTrader:
             if filled_shares < size_shares:
                 unfilled_fraction = (size_shares - filled_shares) / size_shares
                 release_value = registered_notional * unfilled_fraction
-                await self.risk.release_exposure(pos.market_id, release_value, pos.trader_address)
+                await self.risk.release_exposure(pos.market_id, release_value, pos.trader_address, pos.event_id)
                 metrics.EXPOSURE_RELEASED.labels(cause="partial_fill_remainder").inc()
                 pos.size_shares = filled_shares
                 logger.info(

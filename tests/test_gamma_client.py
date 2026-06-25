@@ -133,3 +133,27 @@ class TestParseMarket:
     def test_handles_missing_volume(self):
         market = _parse_market({"condition_id": "c1"})
         assert market.volume_24h == 0.0
+
+    def test_event_id_from_nested_events(self):
+        # M7: prefer the first event's stable id/slug for correlation bucketing.
+        raw = {"condition_id": "c1", "events": [{"id": "evt-99", "slug": "us-election"}]}
+        assert _parse_market(raw).event_id == "evt-99"
+
+    def test_event_id_from_flat_field(self):
+        raw = {"condition_id": "c1", "eventSlug": "super-bowl"}
+        assert _parse_market(raw).event_id == "super-bowl"
+
+    def test_event_id_blank_when_absent(self):
+        assert _parse_market({"condition_id": "c1"}).event_id == ""
+
+    def test_category_from_explicit_field_lowercased(self):
+        # M6: category drives the vol-adaptive TP/SL multiplier; normalized to lower.
+        raw = {"condition_id": "c1", "category": "Crypto"}
+        assert _parse_market(raw).category == "crypto"
+
+    def test_category_from_first_tag(self):
+        raw = {"condition_id": "c1", "tags": [{"label": "Politics"}]}
+        assert _parse_market(raw).category == "politics"
+
+    def test_category_blank_when_absent(self):
+        assert _parse_market({"condition_id": "c1"}).category == ""
