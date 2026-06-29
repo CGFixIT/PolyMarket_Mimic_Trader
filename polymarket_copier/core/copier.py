@@ -751,6 +751,15 @@ class CopyTrader:
 
     async def _exit_position_locked(self, pos, price: float, reason: ExitReason) -> None:
         """Place a SELL order with retry/backoff and close the DB record only after a confirmed fill."""
+        db_pos = await self.portfolio.get_position(pos.position_id)
+        if db_pos is not None and db_pos.size_shares != pos.size_shares:
+            logger.warning(
+                "Position %s size mismatch: memory=%.4f vs db=%.4f — using DB value",
+                pos.position_id,
+                pos.size_shares,
+                db_pos.size_shares,
+            )
+            pos.size_shares = db_pos.size_shares
         exit_shares = pos.size_shares
         exit_order = Order(
             market_id=pos.market_id,
