@@ -127,8 +127,11 @@ class CopyTrader:
             try:
                 bucket.remove(pos)
             except ValueError:
-                # Position was already evicted by a concurrent exit — safe to ignore.
-                pass
+                logger.warning(
+                    "Position %s not found in cache for token %s — may indicate cache desync",
+                    pos.position_id,
+                    pos.token_id,
+                )
             if not bucket:
                 del self._pos_cache[pos.token_id]
 
