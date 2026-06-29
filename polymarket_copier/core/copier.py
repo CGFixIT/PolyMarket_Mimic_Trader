@@ -513,7 +513,17 @@ class CopyTrader:
             self._pos_cache.setdefault(pos.token_id, []).append(pos)
             # H12: mark as pending so position_count() + _pending_entries is accurate
             # while the lock is not held during order I/O.
-            self._pending_entries += 1
+            try:
+                self._pending_entries += 1
+            except Exception:
+                # Revert partial state on any unexpected exception while marking pending.
+                self._remove_pos_from_cache(pos)
+                await self.risk.release_exposure(
+                    pos.market_id,
+                    pos.entry_price * pos.size_shares,
+                    pos.trader_address,
+                )
+                raise
 
         # 10. Order I/O + DB persistence — outside the lock (H12).
         # _pending_entries is always decremented in the finally block; cache and

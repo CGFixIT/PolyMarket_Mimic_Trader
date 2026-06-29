@@ -207,6 +207,19 @@ class TestOrderFailureExposureRelease:
         await copier.handle_trade_event(buy_event(market="mkt-z", token="tok-z"))
         assert await copier.portfolio.position_count() == 1
 
+    @pytest.mark.asyncio
+    async def test_pending_entries_zero_after_failed_entry(self, copier):
+        """A failed build_position should not leak _pending_entries and should release exposure."""
+        copier.risk.build_position = AsyncMock(side_effect=RuntimeError("build_position failed"))  # type: ignore[assignment]
+
+        try:
+            await copier.handle_trade_event(buy_event(price=0.50))
+        except RuntimeError:
+            pass
+
+        assert copier._pending_entries == 0, f"Counter leaked: {copier._pending_entries}"
+        assert copier.risk.market_exposure("mkt-a") == pytest.approx(0.0)
+
 
 class TestEdgeRevalidation:
     """M1: re-fetch the price after acquiring the entry lock and skip if it moved
