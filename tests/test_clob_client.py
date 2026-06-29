@@ -451,17 +451,16 @@ class TestPlaceOrderWithTimeout:
         c.place_order = AsyncMock(
             return_value={"status": "LIVE", "order_id": "o1", "filled_size": 0.0, "avg_price": None}
         )
-        c.cancel_order = AsyncMock(return_value=False)
-        c.get_order = AsyncMock(return_value={"filled_size": 0.0, "avg_price": None})
+        # One poll should be enough if the venue confirms the full target immediately.
+        c.cancel_order = AsyncMock(return_value=True)
+        c.get_order = AsyncMock(return_value={"filled_size": 200.0, "avg_price": 0.50})
 
         sleep_calls: list[float] = []
 
         async def fake_sleep(seconds: float) -> None:
             sleep_calls.append(seconds)
 
-        clocks = iter([0.0, 0.0, 2.0])
         monkeypatch.setattr(asyncio, "sleep", fake_sleep)
-        monkeypatch.setattr(time, "monotonic", lambda: next(clocks))
 
         await c.place_order_with_timeout(_gtc_order())
         assert sleep_calls == [0.5]

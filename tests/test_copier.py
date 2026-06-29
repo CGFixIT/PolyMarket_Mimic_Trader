@@ -1177,11 +1177,12 @@ class TestConcurrentExitLock:
     async def test_exit_uses_db_position_size_if_in_memory_mismatch(self, copier):
         await copier.handle_trade_event(buy_event(price=0.50, token="tok-a"))
         pos = (await copier.portfolio.get_open_positions())[0]
+        expected_exit_size_shares = pos.size_shares + 10.0
 
         copier.portfolio.get_position = AsyncMock(
             return_value=SimpleNamespace(
                 position_id=pos.position_id,
-                size_shares=pos.size_shares + 10.0,
+                size_shares=expected_exit_size_shares,
             )
         )
         copier.clob.place_order_with_timeout = AsyncMock(
@@ -1191,4 +1192,4 @@ class TestConcurrentExitLock:
         await copier._exit_position(pos, 0.75, ExitReason.SOURCE_EXIT)
         assert len(copier._exit_locks) == 0
         exit_order = copier.clob.place_order_with_timeout.await_args.args[0]
-        assert exit_order.size_usdc == pytest.approx((pos.size_shares + 10.0) * 0.75)
+        assert exit_order.size_usdc == pytest.approx(expected_exit_size_shares * 0.75)
