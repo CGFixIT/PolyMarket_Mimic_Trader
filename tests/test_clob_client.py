@@ -9,6 +9,8 @@ optional `py-clob-client` dependency or any network access.
 
 from __future__ import annotations
 
+import asyncio
+import time
 from unittest.mock import AsyncMock
 
 import pytest
@@ -442,3 +444,24 @@ class TestPlaceOrderWithTimeout:
         res = await c.place_order_with_timeout(_gtc_order(price=0.50, size_usdc=100.0))
         assert c.place_order.await_count == 1
         assert res["filled_size"] == pytest.approx(199.5)
+
+    @pytest.mark.asyncio
+    async def test_poll_sleep_has_minimum_floor(self, monkeypatch):
+        c = _orchestrator_client(timeout=1.0)
+        c.place_order = AsyncMock(
+            return_value={"status": "LIVE", "order_id": "o1", "filled_size": 0.0, "avg_price": None}
+        )
+        c.cancel_order = AsyncMock(return_value=False)
+        c.get_order = AsyncMock(return_value={"filled_size": 0.0, "avg_price": None})
+
+        sleep_calls: list[float] = []
+
+        async def fake_sleep(seconds: float) -> None:
+            sleep_calls.append(seconds)
+
+        clocks = iter([0.0, 0.0, 2.0])
+        monkeypatch.setattr(asyncio, "sleep", fake_sleep)
+        monkeypatch.setattr(time, "monotonic", lambda: next(clocks))
+
+        await c.place_order_with_timeout(_gtc_order())
+        assert sleep_calls == [0.5]
