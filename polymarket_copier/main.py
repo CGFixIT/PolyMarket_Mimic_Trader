@@ -83,18 +83,7 @@ async def run_bot(config_path: Optional[str] = None, mode: Optional[str] = None)
     portfolio = PortfolioManager(db_path="data/positions.db")
     await portfolio.init()
 
-    # Restore open positions to risk_manager exposure tracking on restart.
-    # rehydrate_exposure() registers the exposure and warns (rather than
-    # silently carrying) if a since-lowered cap is now breached.
-    # Fetch once here; pass the same list to rehydrate_position_cache() below
-    # to avoid a redundant DB round-trip.
     startup_positions = await portfolio.get_open_positions()
-    for pos in startup_positions:
-        risk_manager.rehydrate_exposure(
-            market_id=pos.market_id,
-            trader_address=pos.trader_address,
-            value=pos.entry_price * pos.size_shares,
-        )
 
     gamma_client = GammaClient(session=shared_session)
     clob_client = ClobClient(config)
@@ -145,6 +134,15 @@ async def run_bot(config_path: Optional[str] = None, mode: Optional[str] = None)
     # H11: warm the in-memory position cache from the DB so handle_price_tick()
     # has zero-latency position lookups from the first WS tick onward.
     await copier.rehydrate_position_cache(open_positions=startup_positions)
+    # Restore open positions to risk_manager exposure tracking after cache is warm.
+    # rehydrate_exposure() registers the exposure and warns (rather than
+    # silently carrying) if a since-lowered cap is now breached.
+    for pos in startup_positions:
+        risk_manager.rehydrate_exposure(
+            market_id=pos.market_id,
+            trader_address=pos.trader_address,
+            value=pos.entry_price * pos.size_shares,
+        )
 
     shutdown_event = asyncio.Event()
 
@@ -211,7 +209,7 @@ async def run_bot(config_path: Optional[str] = None, mode: Optional[str] = None)
             if tracker.needs_rebalance:
                 new_traders = await tracker.refresh()
                 if new_traders:
-                    monitor.set_wallets([t.stats.address for t in new_traders])
+                    await monitor.set_wallets([t.stats.address for t in new_traders])
                     copier.update_tracker_win_rates({t.stats.address: t.stats.win_rate for t in new_traders})
                     copier.update_tracker_mean_pnl({t.stats.address: t.stats.mean_pnl for t in new_traders})
                     _update_tracker_metrics(tracker)
@@ -219,7 +217,7 @@ async def run_bot(config_path: Optional[str] = None, mode: Optional[str] = None)
             demoted = await copier.check_trader_demotion()
             if demoted:
                 remaining = [w for w in monitor._wallets if w not in set(demoted)]
-                monitor.set_wallets(remaining)
+                await monitor.set_wallets(remaining)
                 logger.info("Demoted %d traders, now tracking %d", len(demoted), len(remaining))
 
     async def metrics_loop() -> None:

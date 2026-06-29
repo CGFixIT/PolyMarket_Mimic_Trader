@@ -169,6 +169,7 @@ class TradeMonitor:
         # Default: 25 requests / 60 s (headroom below the assumed 30/min cap).
         # Inject a custom limiter in main.py to share budget across components.
         self._rate_limiter: AsyncLimiter = rate_limiter or AsyncLimiter(25, 60)
+        self._wallet_lock = asyncio.Lock()
 
         # Track last-seen trade IDs per wallet to detect new trades.
         # OrderedDict (used as an insertion-ordered set) so overflow eviction is
@@ -247,20 +248,13 @@ class TradeMonitor:
         """Remove a token from the real-time price feed (after position closed)."""
         self._subscribed_tokens.discard(token_id)
 
-    def set_wallets(self, wallets: list[str]) -> None:
-        """Replace the tracked-wallet list without losing seen-id state for retained wallets.
-
-        C5 fix: poking ``monitor._wallets`` directly at rebalance left any newly-added
-        wallet without a ``_seen_trade_ids`` entry → KeyError in ``_filter_new_trades``
-        swallowed by ``return_exceptions=True`` → the new wallet was silently never polled
-        until restart.  This method initialises the seen-id dict for new wallets so their
-        first poll primes the baseline (cold-start guard) rather than KeyError-ing out.
-        """
+    async def set_wallets(self, wallets: list[str]) -> None:
+        """Replace the tracked-wallet list without losing seen-id state for retained wallets."""
         wallets = [w.lower() for w in wallets]
-        for w in wallets:
-            self._seen_trade_ids.setdefault(w, OrderedDict())
-            # New wallets are absent from _primed_wallets → first poll primes them.
-        self._wallets = wallets
+        async with self._wallet_lock:
+            for w in wallets:
+                self._seen_trade_ids.setdefault(w, OrderedDict())
+            self._wallets = wallets
 
     @property
     def ws_healthy(self) -> bool:
@@ -446,10 +440,12 @@ class TradeMonitor:
         one wallet learns it for all. The bounded offset decorrelates per-wallet
         timing while keeping detection latency within poll_jitter of immediate.
         """
-        tasks = [self._poll_wallet_staggered(session, wallet) for wallet in self._wallets]
+        async with self._wallet_lock:
+            wallets = list(self._wallets)
+        tasks = [self._poll_wallet_staggered(session, wallet) for wallet in wallets]
         results = await asyncio.gather(*tasks, return_exceptions=True)
 
-        for wallet, result in zip(self._wallets, results, strict=True):
+        for wallet, result in zip(wallets, results, strict=True):
             if isinstance(result, Exception):
                 logger.warning("Poll failed for wallet %s: %s", wallet[:10], result)
 

@@ -127,8 +127,11 @@ class CopyTrader:
             try:
                 bucket.remove(pos)
             except ValueError:
-                # Position was already evicted by a concurrent exit — safe to ignore.
-                pass
+                logger.warning(
+                    "Position %s not found in cache for token %s — may indicate cache desync",
+                    pos.position_id,
+                    pos.token_id,
+                )
             if not bucket:
                 del self._pos_cache[pos.token_id]
 
@@ -513,7 +516,17 @@ class CopyTrader:
             self._pos_cache.setdefault(pos.token_id, []).append(pos)
             # H12: mark as pending so position_count() + _pending_entries is accurate
             # while the lock is not held during order I/O.
-            self._pending_entries += 1
+            try:
+                self._pending_entries += 1
+            except Exception:
+                # Revert partial state on any unexpected exception while marking pending.
+                self._remove_pos_from_cache(pos)
+                await self.risk.release_exposure(
+                    pos.market_id,
+                    pos.entry_price * pos.size_shares,
+                    pos.trader_address,
+                )
+                raise
 
         # 10. Order I/O + DB persistence — outside the lock (H12).
         # _pending_entries is always decremented in the finally block; cache and
@@ -730,12 +743,23 @@ class CopyTrader:
                 pos.position_id,
             )
             return
-        async with lock:
-            await self._exit_position_locked(pos, price, reason)
-        self._exit_locks.pop(pos.position_id, None)
+        try:
+            async with lock:
+                await self._exit_position_locked(pos, price, reason)
+        finally:
+            self._exit_locks.pop(pos.position_id, None)
 
     async def _exit_position_locked(self, pos, price: float, reason: ExitReason) -> None:
         """Place a SELL order with retry/backoff and close the DB record only after a confirmed fill."""
+        db_pos = await self.portfolio.get_position(pos.position_id)
+        if db_pos is not None and db_pos.size_shares != pos.size_shares:
+            logger.warning(
+                "Position %s size mismatch: memory=%.4f vs db=%.4f — using DB value",
+                pos.position_id,
+                pos.size_shares,
+                db_pos.size_shares,
+            )
+            pos.size_shares = db_pos.size_shares
         exit_shares = pos.size_shares
         exit_order = Order(
             market_id=pos.market_id,

@@ -391,7 +391,7 @@ class ClobClient:
 
         # Poll for the resting order to fill, up to the timeout (return early if it does).
         deadline = time.monotonic() + ct.live_order_timeout_seconds
-        poll = min(1.0, max(ct.live_order_timeout_seconds / 4.0, 0.01))
+        poll = max(0.5, min(ct.live_order_timeout_seconds / 4.0, 2.0))
         while filled < intended_shares and order_id and time.monotonic() < deadline:
             await asyncio.sleep(poll)
             confirm = await self.get_order(order_id)

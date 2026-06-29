@@ -510,46 +510,52 @@ class TestSetWallets:
     """C5 fix: set_wallets() must initialise _seen_trade_ids for newly-added wallets
     so that their first poll primes the baseline rather than KeyError-ing out."""
 
-    def test_set_wallets_adds_seen_ids_for_new_wallet(self):
+    @pytest.mark.asyncio
+    async def test_set_wallets_adds_seen_ids_for_new_wallet(self):
         monitor = TradeMonitor(tracked_wallets=["0xold"], on_trade=_noop_trade)
-        monitor.set_wallets(["0xold", "0xnew"])
+        await monitor.set_wallets(["0xold", "0xnew"])
         assert "0xnew" in monitor._seen_trade_ids
         assert "0xold" in monitor._seen_trade_ids  # retained
 
-    def test_set_wallets_replaces_wallet_list(self):
+    @pytest.mark.asyncio
+    async def test_set_wallets_replaces_wallet_list(self):
         monitor = TradeMonitor(tracked_wallets=["0xold"], on_trade=_noop_trade)
-        monitor.set_wallets(["0xnew"])
+        await monitor.set_wallets(["0xnew"])
         assert monitor._wallets == ["0xnew"]
         assert "0xold" not in monitor._wallets
 
-    def test_set_wallets_lowercases(self):
+    @pytest.mark.asyncio
+    async def test_set_wallets_lowercases(self):
         monitor = TradeMonitor(tracked_wallets=["0xabc"], on_trade=_noop_trade)
-        monitor.set_wallets(["0xABC", "0xDEF"])
+        await monitor.set_wallets(["0xABC", "0xDEF"])
         assert monitor._wallets == ["0xabc", "0xdef"]
 
-    def test_set_wallets_new_wallet_not_primed(self):
+    @pytest.mark.asyncio
+    async def test_set_wallets_new_wallet_not_primed(self):
         """A wallet added via set_wallets must be unprimed so its first poll is a
         baseline seed (cold-start guard) rather than copying a backlog of trades."""
         monitor = TradeMonitor(tracked_wallets=["0xold"], on_trade=_noop_trade)
         monitor._primed_wallets.add("0xold")
-        monitor.set_wallets(["0xold", "0xnew"])
+        await monitor.set_wallets(["0xold", "0xnew"])
         assert "0xnew" not in monitor._primed_wallets  # new → not primed
         assert "0xold" in monitor._primed_wallets  # existing priming retained
 
-    def test_set_wallets_preserves_seen_ids_for_retained_wallet(self):
+    @pytest.mark.asyncio
+    async def test_set_wallets_preserves_seen_ids_for_retained_wallet(self):
         monitor = TradeMonitor(tracked_wallets=["0xold"], on_trade=_noop_trade)
         from collections import OrderedDict
 
         monitor._seen_trade_ids["0xold"]["tx-seen"] = None
-        monitor.set_wallets(["0xold", "0xnew"])
+        await monitor.set_wallets(["0xold", "0xnew"])
         # Existing seen ids must survive — losing them causes duplicate detection.
         assert "tx-seen" in monitor._seen_trade_ids["0xold"]
 
-    def test_new_wallet_can_be_polled_without_keyerror(self):
+    @pytest.mark.asyncio
+    async def test_new_wallet_can_be_polled_without_keyerror(self):
         """After set_wallets, calling _filter_new_trades on the new wallet must
         not raise KeyError (the bug that C5 fixes)."""
         monitor = TradeMonitor(tracked_wallets=["0xold"], on_trade=_noop_trade)
-        monitor.set_wallets(["0xold", "0xnew"])
+        await monitor.set_wallets(["0xold", "0xnew"])
         activity = [{"id": "t1", "type": "trade", "side": "BUY"}]
         # Must not raise — the pre-fix code KeyError'd here.
         result = monitor._filter_new_trades("0xnew", activity, prime=True)
