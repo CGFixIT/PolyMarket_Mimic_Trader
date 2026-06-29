@@ -95,30 +95,6 @@ class CopyTradingConfig(BaseModel):
     live_retry_slippage_pct: float = 0.02
     live_order_max_retries: int = 1
 
-    @model_validator(mode="after")
-    def _validate_live_retry(self) -> "CopyTradingConfig":
-        # M12 safety rails: the retry must cross MORE of the book than the first
-        # attempt, but never arbitrarily far; and we retry at most once.
-        if self.live_retry_slippage_pct < self.max_live_slippage_pct:
-            raise ValueError(
-                "live_retry_slippage_pct must be >= max_live_slippage_pct "
-                f"({self.live_retry_slippage_pct} < {self.max_live_slippage_pct})"
-            )
-        if self.live_retry_slippage_pct > 0.05:
-            raise ValueError("live_retry_slippage_pct must be <= 0.05 (hard ceiling)")
-        if self.live_order_max_retries not in (0, 1):
-            raise ValueError("live_order_max_retries must be 0 or 1")
-        # Slippage parity: live mode must be at least as permissive as paper mode.
-        # If paper_fill_slippage_pct > max_live_slippage_pct, paper PnL is penalised
-        # more than live execution would be, making paper results misleadingly pessimistic.
-        if self.paper_fill_slippage_pct > self.max_live_slippage_pct:
-            raise ValueError(
-                "max_live_slippage_pct must be >= paper_fill_slippage_pct so paper PnL "
-                "reflects live execution costs rather than a more-penalised simulation "
-                f"(got max_live={self.max_live_slippage_pct:.4f} < paper={self.paper_fill_slippage_pct:.4f})"
-            )
-        return self
-
     # Paper-mode fill simulation: apply half-spread slippage + taker fee so
     # paper PnL reflects live execution costs rather than zero-cost fills.
     paper_fill_slippage_pct: float = 0.005  # ~0.5% half-spread
@@ -170,6 +146,30 @@ class CopyTradingConfig(BaseModel):
     # M4: decay the tracker prior toward neutral (zero edge) as it ages — fresh
     # leaderboard data is more reliable. Weight = 1/(1 + hours_since_last_update).
     tracker_prior_decay_enabled: bool = True
+
+    @model_validator(mode="after")
+    def _validate_live_retry(self) -> "CopyTradingConfig":
+        # M12 safety rails: the retry must cross MORE of the book than the first
+        # attempt, but never arbitrarily far; and we retry at most once.
+        if self.live_retry_slippage_pct < self.max_live_slippage_pct:
+            raise ValueError(
+                "live_retry_slippage_pct must be >= max_live_slippage_pct "
+                f"({self.live_retry_slippage_pct} < {self.max_live_slippage_pct})"
+            )
+        if self.live_retry_slippage_pct > 0.05:
+            raise ValueError("live_retry_slippage_pct must be <= 0.05 (hard ceiling)")
+        if self.live_order_max_retries not in (0, 1):
+            raise ValueError("live_order_max_retries must be 0 or 1")
+        # Slippage parity: live mode must be at least as permissive as paper mode.
+        # If paper_fill_slippage_pct > max_live_slippage_pct, paper PnL is penalised
+        # more than live execution would be, making paper results misleadingly pessimistic.
+        if self.paper_fill_slippage_pct > self.max_live_slippage_pct:
+            raise ValueError(
+                "max_live_slippage_pct must be >= paper_fill_slippage_pct so paper PnL "
+                "reflects live execution costs rather than a more-penalised simulation "
+                f"(got max_live={self.max_live_slippage_pct:.4f} < paper={self.paper_fill_slippage_pct:.4f})"
+            )
+        return self
 
 
 class RiskManagementConfig(BaseModel):
