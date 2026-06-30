@@ -17,6 +17,7 @@ Testing and checks:
 - `pytest -v`
 - `pytest -v -m "not integration"`
 - `ruff check .`
+- `python -m mypy polymarket_copier`
 
 Baseline architecture from initial inspection:
 - `run_bot()` initializes config, logger, shared aiohttp session, risk manager, portfolio, clients.
@@ -28,3 +29,6 @@ Baseline architecture from initial inspection:
 Notes:
 - This repo contains `CLAUDE.md` with detailed operational rules.
 - Canonical Codex repo instructions live in root `AGENTS.md`.
+- Repo-local Codex workflow notes live in `.codex/commands/`.
+- `.codex/commands/optimizer.md` mirrors the existing Claude optimizer audit.
+- `.codex/commands/ponytail.md` documents how to apply Ponytail safely in this trading repo.
