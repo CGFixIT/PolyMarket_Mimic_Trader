@@ -169,6 +169,30 @@ class TradeMonitor:
         # Default: 25 requests / 60 s (headroom below the assumed 30/min cap).
         # Inject a custom limiter in main.py to share budget across components.
         self._rate_limiter: AsyncLimiter = rate_limiter or AsyncLimiter(25, 60)
+
+        # Warn when the expected poll rate for this wallet count would saturate
+        # the default 25/min budget, causing requests to queue and detection
+        # latency to grow well beyond the nominal poll_interval.
+        # Formula: peak_rpm = wallet_count * (60 / poll_interval)
+        # At poll_interval=8s and 4 wallets → 30 rpm, which already equals the
+        # Polymarket Data API cap and exceeds the 25/min default budget.
+        if rate_limiter is None and poll_interval > 0:
+            peak_rpm = len(tracked_wallets) * (60.0 / poll_interval)
+            _DEFAULT_BUDGET_RPM = 25
+            if peak_rpm > _DEFAULT_BUDGET_RPM:
+                logger.warning(
+                    "Rate-limiter may be undersized: %d wallet(s) × %.0f polls/min "
+                    "= %.0f req/min peak, but the default budget is %d req/min. "
+                    "Polls will queue and detection latency will grow. "
+                    "Pass rate_limiter=AsyncLimiter(%d, 60) (or lower poll_interval) "
+                    "to stay within the Polymarket Data API cap.",
+                    len(tracked_wallets),
+                    60.0 / poll_interval,
+                    peak_rpm,
+                    _DEFAULT_BUDGET_RPM,
+                    min(int(peak_rpm), 28),  # cap at 28 to leave headroom
+                )
+
         self._wallet_lock = asyncio.Lock()
 
         # Track last-seen trade IDs per wallet to detect new trades.
