@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import math
 import time
 import uuid
 
@@ -582,7 +583,7 @@ class CopyTrader:
                 self._record_skip("no_fill", event, registered_notional=round(registered_notional, 2))
                 return
 
-            if filled_shares < size_shares:
+            if filled_shares < size_shares and not math.isclose(filled_shares, size_shares, rel_tol=1e-6):
                 unfilled_fraction = (size_shares - filled_shares) / size_shares
                 release_value = registered_notional * unfilled_fraction
                 await self.risk.release_exposure(pos.market_id, release_value, pos.trader_address)
@@ -939,7 +940,6 @@ class CopyTrader:
             win_rate, sample = await self.portfolio.get_trader_win_rate(addr)
             if sample < min_trades:
                 continue
-            # Wilson upper confidence bound (95% CI, z=1.645 one-sided)
             z = 1.645
             n = sample
             p = win_rate

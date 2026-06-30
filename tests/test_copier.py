@@ -678,6 +678,45 @@ class TestFillReconciliation:
         positions = await copier.portfolio.get_open_positions()
         assert positions[0].size_shares == pytest.approx(75.0)
 
+    @pytest.mark.asyncio
+    async def test_near_full_fill_not_treated_as_partial(self, copier):
+        """Float drift of 1e-10 shares under the intended size must NOT trigger the
+        partial-fill path.  Before the math.isclose fix, `100.0 - 1e-10 < 100.0`
+        was True, releasing a fractional amount of exposure and corrupting cap
+        accounting for an effectively-full fill.
+        Event: $100 source size → copy = $50 → 100 shares @ 0.50.
+        Venue reports 100.0 − 1e-10 (fee-rounding float drift)."""
+        copier.clob.place_order = AsyncMock(
+            return_value={
+                "status": "LIVE",
+                "filled_size": 100.0 - 1e-10,
+                "avg_price": 0.50,
+            }
+        )
+        await copier.handle_trade_event(buy_event(price=0.50, size=100.0, market="mkt-fp"))
+        positions = await copier.portfolio.get_open_positions()
+        assert len(positions) == 1
+        # size_shares stays at the intended 100.0 — no partial-fill adjustment.
+        assert positions[0].size_shares == pytest.approx(100.0, rel=1e-6)
+        # Full notional remains reserved: 0.50 * 100 = $50.
+        assert copier.risk.market_exposure("mkt-fp") == pytest.approx(50.0, rel=1e-6)
+
+    def test_reconcile_fill_near_full_returns_reported_value(self):
+        """_reconcile_fill must pass the raw fill value through; the caller
+        uses math.isclose to decide whether the shortfall is meaningful."""
+        import math as _math
+
+        reported = 100.0 - 1e-10
+        filled, price = CopyTrader._reconcile_fill(
+            {"status": "LIVE", "filled_size": reported, "avg_price": 0.50},
+            size_shares=100.0,
+            current_price=0.50,
+        )
+        assert filled == pytest.approx(reported, rel=1e-12)
+        assert _math.isclose(filled, 100.0, rel_tol=1e-6), (
+            "fill is within rel_tol=1e-6 of size_shares — should be treated as full"
+        )
+
 
 # ─── Kelly tracker-prior seeding ─────────────────────────────────────────────
 
