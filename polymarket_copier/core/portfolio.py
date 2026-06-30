@@ -309,8 +309,7 @@ class PortfolioManager:
         """
         db = self._require_db()
         cursor = await db.execute(
-            "SELECT COALESCE(SUM((sl_price - entry_price) * size_shares), 0.0) "
-            "FROM positions WHERE status = 'open'"
+            "SELECT COALESCE(SUM((sl_price - entry_price) * size_shares), 0.0) FROM positions WHERE status = 'open'"
         )
         row = await cursor.fetchone()
         return float(row[0]) if row else 0.0
